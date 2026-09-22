@@ -1,0 +1,14 @@
+[package]
+name = "cleanrs-tui"
+version = "0.1.0"
+edition = "2021"
+description = "Terminal UI for cleanrs"
+license = "MIT"
+
+[dependencies]
+anyhow = "1"
+cleanrs-core = { path = "../cleanrs-core" }
+crossterm = "0.29"
+humansize = "2"
+ratatui = "0.29"
+

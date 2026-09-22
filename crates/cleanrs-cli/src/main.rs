@@ -20,6 +20,8 @@ enum Command {
     Clean(CleanArgs),
     /// List registered cleaners and whether their command is available.
     List,
+    /// Open the interactive terminal UI.
+    Tui,
 }
 
 #[derive(Debug, Args)]
@@ -43,6 +45,9 @@ struct CleanArgs {
     /// Execute commands. Without this flag clean is always a dry-run.
     #[arg(long)]
     yes: bool,
+    /// Allow execution of Manual-risk rules, such as Docker volume pruning.
+    #[arg(long)]
+    force: bool,
     /// Emit machine-readable JSON.
     #[arg(long)]
     json: bool,
@@ -61,6 +66,7 @@ fn main() -> Result<()> {
         Command::Scan(args) => scan_command(args),
         Command::Clean(args) => clean_command(args),
         Command::List => list_command(),
+        Command::Tui => cleanrs_tui::run(),
     }
 }
 
@@ -85,6 +91,14 @@ fn clean_command(args: CleanArgs) -> Result<()> {
 
     for cleaner in selected {
         if !cleaner.is_available() {
+            continue;
+        }
+
+        if !dry_run && cleaner.risk_level() == cleanrs_core::RiskLevel::Manual && !args.force {
+            errors.push(format!(
+                "{} requires --force because it is a Manual-risk cleaner",
+                cleaner.id()
+            ));
             continue;
         }
 

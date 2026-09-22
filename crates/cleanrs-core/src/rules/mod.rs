@@ -1,6 +1,16 @@
 pub mod brew;
+pub mod cargo;
+pub mod dart;
+pub mod docker;
+pub mod gradle;
+pub mod macos_system;
+pub mod maven;
 pub mod npm;
 pub mod pip;
+pub mod pnpm;
+pub mod uv;
+pub mod xcode;
+pub mod yarn;
 
 use anyhow::{Context, Result};
 use std::path::PathBuf;
