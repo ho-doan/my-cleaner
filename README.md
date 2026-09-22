@@ -28,8 +28,13 @@ Agent session/history data and Ollama models are treated as Manual-risk. Ollama
 models are removed through the official ollama rm command, never by deleting
 the model store directly. Active Codex and Claude runtimes are preserved.
 
-The TUI shows root-disk Used/Free/Total and a usage gauge. Press r to reload a
-scan manually; after a clean confirmation it automatically rescans and refreshes
-the disk snapshot. Press f for a read-only inventory of the largest root-disk
-and HOME directories; b returns to cleanup targets. Full-disk inventory never
-creates delete targets.
+The TUI starts in dry-run mode; press d to switch to execute mode. Pressing y
+in dry-run previews only, keeps the targets visible, and does not pretend that
+files were removed. In execute mode, Safe and Caution targets can be cleaned;
+Manual targets require the explicit FORCE confirmation. After an actual clean,
+the TUI rescans and refreshes the disk snapshot. Press r to reload manually.
+
+Press f for a read-only inventory of the largest root-disk and HOME directories;
+b returns to cleanup targets. Full-disk inventory never creates delete targets.
+Every inventory row and every excluded system/mount path is explicitly marked
+`READONLY`.

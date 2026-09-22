@@ -361,7 +361,12 @@ fn handle_confirmation(app: &mut App, key: KeyEvent) -> bool {
 }
 
 fn execute_selected(app: &mut App) {
-    app.mode = Mode::Cleaning;
+    let dry_run = app.dry_run;
+    app.mode = if dry_run {
+        Mode::Reviewing
+    } else {
+        Mode::Cleaning
+    };
     app.results.clear();
     app.errors.clear();
     let disk_before = app.disk.or_else(read_disk_usage);
@@ -375,12 +380,12 @@ fn execute_selected(app: &mut App) {
                 .push(format!("unknown cleaner {}", row.cleaner_id));
             continue;
         };
-        match cleaner.clean(&row.target, app.dry_run) {
+        match cleaner.clean(&row.target, dry_run) {
             Ok(result) => app.results.push(result),
             Err(error) => app.errors.push(format!("{}: {error:#}", row.cleaner_id)),
         }
     }
-    let action = if app.dry_run { "Previewed" } else { "Cleaned" };
+    let action = if dry_run { "Previewed" } else { "Cleaned" };
     let estimated_freed = app
         .results
         .iter()
@@ -392,8 +397,13 @@ fn execute_selected(app: &mut App) {
         _ => 0,
     };
     app.disk = disk_after;
+    let follow_up = if dry_run {
+        "no files changed; targets kept"
+    } else {
+        "scan refreshed"
+    };
     app.last_action = Some(format!(
-        "{action} {} target(s), estimated {} freed, actual free change {}; {} error(s); scan refreshed",
+        "{action} {} target(s), estimated {} freed, actual free change {}; {} error(s); {follow_up}",
         app.results.len(),
         format_size(estimated_freed, DECIMAL),
         format_size(actual_free_change, DECIMAL),
@@ -556,8 +566,13 @@ fn render_full_disk(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         items.push(ListItem::new("Largest root entries:"));
         items.extend(report.root_entries.iter().map(|entry| {
             ListItem::new(format!(
-                "{}  {}",
+                "{}  [{}] {}",
                 format_size(entry.size_bytes, DECIMAL),
+                if entry.read_only {
+                    "READONLY"
+                } else {
+                    "deletable"
+                },
                 entry.path.display()
             ))
         }));
@@ -565,14 +580,26 @@ fn render_full_disk(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         items.push(ListItem::new("Largest HOME entries:"));
         items.extend(report.home_entries.iter().map(|entry| {
             ListItem::new(format!(
-                "{}  {}",
+                "{}  [{}] {}",
                 format_size(entry.size_bytes, DECIMAL),
+                if entry.read_only {
+                    "READONLY"
+                } else {
+                    "deletable"
+                },
                 entry.path.display()
             ))
         }));
+        items.push(ListItem::new("Read-only system/mount paths:"));
+        items.extend(
+            report
+                .readonly_paths
+                .iter()
+                .map(|path| ListItem::new(format!("[READONLY] {}", path.display()))),
+        );
         items.push(ListItem::new(format!(
-            "Excluded: {}  |  Inaccessible: {}",
-            report.excluded_paths.len(),
+            "Read-only paths: {}  |  Inaccessible: {}",
+            report.readonly_paths.len(),
             report.inaccessible_paths
         )));
     } else {
@@ -639,9 +666,14 @@ fn footer_text(app: &App) -> String {
             app.confirm_text
         ),
         Mode::Confirming => format!(
-            "Execute {} selected target(s) in {} mode? [y] yes  [n] cancel",
+            "{} {} selected target(s)? [y] {}  [n] cancel",
+            if app.dry_run { "Preview" } else { "Execute" },
             app.selected_count(),
-            if app.dry_run { "dry-run" } else { "execute" }
+            if app.dry_run {
+                "preview only; no files changed"
+            } else {
+                "yes"
+            }
         ),
         Mode::Cleaning => "Working…".to_owned(),
     }

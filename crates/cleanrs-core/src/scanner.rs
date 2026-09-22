@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 pub struct DiskScanEntry {
     pub path: PathBuf,
     pub size_bytes: u64,
+    /// Full-disk inventory entries are informational only and never deletable.
+    pub read_only: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -15,7 +17,9 @@ pub struct FullDiskScan {
     pub root: PathBuf,
     pub root_entries: Vec<DiskScanEntry>,
     pub home_entries: Vec<DiskScanEntry>,
-    pub excluded_paths: Vec<PathBuf>,
+    /// System and mount paths intentionally not traversed by the inventory.
+    /// They are surfaced as read-only instead of becoming delete targets.
+    pub readonly_paths: Vec<PathBuf>,
     pub inaccessible_paths: usize,
 }
 
@@ -58,9 +62,9 @@ pub fn full_disk_scan(root: &Path, limit: usize) -> Result<FullDiskScan> {
         anyhow::bail!("full-disk scan root is not a directory: {}", root.display());
     }
 
-    let excluded_paths = excluded_root_paths(root);
+    let readonly_paths = excluded_root_paths(root);
     let (mut root_entries, root_inaccessible) =
-        scan_children(root, &excluded_paths).with_context(|| format!("scan {}", root.display()))?;
+        scan_children(root, &readonly_paths).with_context(|| format!("scan {}", root.display()))?;
     root_entries.sort_by_key(|entry| std::cmp::Reverse(entry.size_bytes));
     root_entries.truncate(limit);
 
@@ -75,7 +79,7 @@ pub fn full_disk_scan(root: &Path, limit: usize) -> Result<FullDiskScan> {
         root: root.to_path_buf(),
         root_entries,
         home_entries,
-        excluded_paths,
+        readonly_paths,
         inaccessible_paths: root_inaccessible + home_inaccessible,
     })
 }
@@ -103,7 +107,11 @@ fn scan_children(parent: &Path, excluded: &[PathBuf]) -> Result<(Vec<DiskScanEnt
             }
 
             let (size_bytes, inaccessible) = tolerant_dir_size(&path);
-            let entry = (size_bytes > 0).then_some(DiskScanEntry { path, size_bytes });
+            let entry = (size_bytes > 0).then_some(DiskScanEntry {
+                path,
+                size_bytes,
+                read_only: true,
+            });
             (entry, inaccessible)
         })
         .collect::<Vec<_>>();
