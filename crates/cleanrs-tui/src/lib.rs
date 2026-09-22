@@ -12,10 +12,10 @@ use fs2::{available_space, total_space};
 use humansize::{format_size, DECIMAL};
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout},
+    layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Gauge, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, Gauge, List, ListItem, ListState, Paragraph, Wrap},
     Frame, Terminal,
 };
 use std::{
@@ -812,6 +812,7 @@ fn render(frame: &mut Frame, app: &App) {
             " cleanrs — scanning {}/{} cleaners ",
             app.received_scans, app.expected_scans
         ),
+        Mode::Reviewing if app.show_full_disk => " cleanrs — full-disk explorer ".to_owned(),
         Mode::Reviewing => " cleanrs — review targets ".to_owned(),
         Mode::Confirming => " cleanrs — confirm ".to_owned(),
         Mode::Cleaning if app.explorer_deleting => " cleanrs — moving item to Trash ".to_owned(),
@@ -833,9 +834,30 @@ fn render(frame: &mut Frame, app: &App) {
         ),
         None => "Disk /  usage unavailable".to_owned(),
     };
+    let mode_color = match app.mode {
+        Mode::Scanning => Color::Cyan,
+        Mode::Reviewing => Color::Green,
+        Mode::Confirming => Color::Yellow,
+        Mode::Cleaning => Color::Magenta,
+    };
     frame.render_widget(
-        Paragraph::new(vec![Line::from(title), Line::from(disk_line)])
-            .block(Block::default().borders(Borders::ALL)),
+        Paragraph::new(vec![
+            Line::from(Span::styled(
+                title,
+                Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(disk_line, Style::default().fg(Color::Gray))),
+        ])
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" MY CLEANER ")
+                .title_style(
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+        ),
         header[0],
     );
     if let Some(disk) = app.disk {
@@ -877,6 +899,117 @@ fn render(frame: &mut Frame, app: &App) {
             .block(Block::default().borders(Borders::ALL)),
         vertical[2],
     );
+    if matches!(app.mode, Mode::Confirming) {
+        render_confirmation_modal(frame, app);
+    }
+}
+
+fn render_confirmation_modal(frame: &mut Frame, app: &App) {
+    let area = centered_rect(78, 48, frame.area());
+    let destructive = app.pending_explorer_delete.is_some();
+    let border_color = if destructive {
+        Color::Red
+    } else {
+        Color::Yellow
+    };
+    let mut lines = Vec::new();
+
+    if let Some(target) = &app.pending_explorer_delete {
+        let item_kind = if target.path.is_dir() {
+            "folder and all contents"
+        } else {
+            "file"
+        };
+        lines.push(Line::from(Span::styled(
+            "Move to Trash",
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(format!(
+            "{item_kind}: {}",
+            target.path.display()
+        )));
+        lines.push(Line::from(format!(
+            "Estimated size: {}",
+            format_size(target.size_bytes, DECIMAL)
+        )));
+        lines.push(Line::from(""));
+        lines.push(Line::from("This is recoverable from the macOS Trash."));
+        lines.push(Line::from("Press [y] to confirm or [n]/[esc] to cancel."));
+    } else if app.has_manual_selection() && !app.dry_run {
+        lines.push(Line::from(Span::styled(
+            "Manual-risk cleanup",
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from("Type FORCE in the footer, then press [enter]."));
+        lines.push(Line::from(format!(
+            "Selected: {} target(s) · {}",
+            app.selected_count(),
+            format_size(app.selected_size(), DECIMAL)
+        )));
+    } else {
+        lines.push(Line::from(Span::styled(
+            if app.dry_run {
+                "Preview cleanup"
+            } else {
+                "Execute cleanup"
+            },
+            Style::default()
+                .fg(if app.dry_run {
+                    Color::Cyan
+                } else {
+                    Color::Yellow
+                })
+                .add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(format!(
+            "{} selected target(s) · {}",
+            app.selected_count(),
+            format_size(app.selected_size(), DECIMAL)
+        )));
+        lines.push(Line::from(if app.dry_run {
+            "No files will change in preview mode."
+        } else {
+            "Selected targets will be moved/processed."
+        }));
+        lines.push(Line::from("Press [y] to confirm or [n]/[esc] to cancel."));
+    }
+
+    let modal = Paragraph::new(lines).wrap(Wrap { trim: true }).block(
+        Block::default()
+            .title(if destructive {
+                " Confirm destructive action "
+            } else {
+                " Confirm "
+            })
+            .title_style(
+                Style::default()
+                    .fg(border_color)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(border_color)),
+    );
+    frame.render_widget(Clear, area);
+    frame.render_widget(modal, area);
+}
+
+fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
+    let vertical = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(area);
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(vertical[1])[1]
 }
 
 fn render_sidebar(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
@@ -887,26 +1020,56 @@ fn render_sidebar(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
             .or_insert(0usize) += 1;
     }
     let mut lines = vec![Line::from(Span::styled(
-        "Categories",
-        Style::default().add_modifier(Modifier::BOLD),
+        "CLEANUP",
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
     ))];
     for (category, count) in categories {
-        lines.push(Line::from(format!("{category}: {count}")));
+        lines.push(Line::from(vec![
+            Span::styled(format!("{category:<14}"), Style::default().fg(Color::Gray)),
+            Span::styled(
+                count.to_string(),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+        ]));
     }
     lines.push(Line::from(""));
-    lines.push(Line::from(format!("Selected: {}", app.selected_count())));
-    lines.push(Line::from(format!(
-        "Size: {}",
-        format_size(app.selected_size(), DECIMAL)
-    )));
-    lines.push(Line::from(format!(
-        "Mode: {}",
-        if app.dry_run { "dry-run" } else { "execute" }
-    )));
+    lines.push(Line::from(vec![
+        Span::styled("Selected  ", Style::default().fg(Color::Gray)),
+        Span::styled(
+            app.selected_count().to_string(),
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("Size      ", Style::default().fg(Color::Gray)),
+        Span::styled(
+            format_size(app.selected_size(), DECIMAL),
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("Mode      ", Style::default().fg(Color::Gray)),
+        Span::styled(
+            if app.dry_run { "DRY-RUN" } else { "EXECUTE" },
+            Style::default()
+                .fg(if app.dry_run {
+                    Color::Cyan
+                } else {
+                    Color::Yellow
+                })
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]));
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        "Full disk",
-        Style::default().add_modifier(Modifier::BOLD),
+        "STORAGE",
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
     )));
     if app.full_disk_scanning {
         lines.push(Line::from("Scanning…"));
@@ -941,36 +1104,71 @@ fn render_sidebar(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     if app.show_full_disk {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
-            "Explorer",
-            Style::default().add_modifier(Modifier::BOLD),
+            "EXPLORER",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
         )));
         if app.directory_scanning {
-            lines.push(Line::from("Scanning folder…"));
+            lines.push(Line::from(Span::styled(
+                "Scanning folder…",
+                Style::default().fg(Color::Yellow),
+            )));
         } else if let Some(report) = &app.directory_scan {
-            lines.push(Line::from(report.path.display().to_string()));
-            lines.push(Line::from(if !report.is_git_repo {
-                "Git: not a repository"
+            lines.push(Line::from(Span::styled(
+                report.path.display().to_string(),
+                Style::default().fg(Color::Gray),
+            )));
+            let git_status = if !report.is_git_repo {
+                ("Git  NOT A REPO", Color::Gray)
             } else if report.git_dirty {
-                "Git: DIRTY"
+                ("Git  DIRTY · preserve changes", Color::Yellow)
             } else {
-                "Git: clean"
-            }));
+                ("Git  CLEAN", Color::Green)
+            };
+            lines.push(Line::from(Span::styled(
+                git_status.0,
+                Style::default().fg(git_status.1),
+            )));
             let suggestions = report
                 .entries
                 .iter()
                 .filter(|entry| entry.suggestion.is_some())
                 .count();
-            lines.push(Line::from(format!("Suggestions: {suggestions}")));
+            lines.push(Line::from(vec![
+                Span::styled("Suggestions  ", Style::default().fg(Color::Gray)),
+                Span::styled(
+                    suggestions.to_string(),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]));
         } else {
-            lines.push(Line::from("Enter opens selected folder"));
+            lines.push(Line::from(Span::styled(
+                "Enter opens selected folder",
+                Style::default().fg(Color::Gray),
+            )));
         }
     }
     if let Some(action) = &app.last_action {
         lines.push(Line::from(""));
-        lines.push(Line::from(action.as_str()));
+        lines.push(Line::from(Span::styled(
+            action.as_str(),
+            Style::default().fg(Color::Yellow),
+        )));
     }
     frame.render_widget(
-        Paragraph::new(lines).block(Block::default().borders(Borders::ALL)),
+        Paragraph::new(lines).wrap(Wrap { trim: true }).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Status ")
+                .title_style(
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+        ),
         area,
     );
 }
@@ -988,33 +1186,49 @@ fn render_full_disk(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         items.push(ListItem::new(format!("Scan error: {error}")));
     } else if let Some(report) = &app.full_disk {
         let root_start = 2;
-        items.push(ListItem::new("Largest root entries:"));
+        items.push(ListItem::new(Span::styled(
+            "Largest root entries",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )));
         items.extend(report.root_entries.iter().map(|entry| {
-            ListItem::new(format!(
-                "{}  [{}] {}",
-                format_size(entry.size_bytes, DECIMAL),
-                if entry.read_only {
-                    "READONLY"
-                } else {
-                    "REVIEW"
-                },
-                entry.path.display()
-            ))
+            let (marker, color) = if entry.read_only {
+                ("READONLY", Color::Red)
+            } else {
+                ("REVIEW", Color::Yellow)
+            };
+            ListItem::new(Line::from(vec![
+                Span::styled(
+                    format!("{}  ", format_size(entry.size_bytes, DECIMAL)),
+                    Style::default().fg(Color::Gray),
+                ),
+                Span::styled(format!("[{marker}]"), Style::default().fg(color)),
+                Span::raw(format!("  {}", entry.path.display())),
+            ]))
         }));
         items.push(ListItem::new(""));
         let home_start = root_start + report.root_entries.len() + 2;
-        items.push(ListItem::new("Largest HOME entries:"));
+        items.push(ListItem::new(Span::styled(
+            "Largest HOME entries",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )));
         items.extend(report.home_entries.iter().map(|entry| {
-            ListItem::new(format!(
-                "{}  [{}] {}",
-                format_size(entry.size_bytes, DECIMAL),
-                if entry.read_only {
-                    "READONLY"
-                } else {
-                    "REVIEW"
-                },
-                entry.path.display()
-            ))
+            let (marker, color) = if entry.read_only {
+                ("READONLY", Color::Red)
+            } else {
+                ("REVIEW", Color::Yellow)
+            };
+            ListItem::new(Line::from(vec![
+                Span::styled(
+                    format!("{}  ", format_size(entry.size_bytes, DECIMAL)),
+                    Style::default().fg(Color::Gray),
+                ),
+                Span::styled(format!("[{marker}]"), Style::default().fg(color)),
+                Span::raw(format!("  {}", entry.path.display())),
+            ]))
         }));
         if !report.root_entries.is_empty() || !report.home_entries.is_empty() {
             selected_index = if app.full_disk_cursor < report.root_entries.len() {
@@ -1023,18 +1237,28 @@ fn render_full_disk(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
                 Some(home_start + app.full_disk_cursor - report.root_entries.len())
             };
         }
-        items.push(ListItem::new("Protected system/mount paths:"));
-        items.extend(
-            report
-                .readonly_paths
-                .iter()
-                .map(|path| ListItem::new(format!("[READONLY] {}", path.display()))),
-        );
-        items.push(ListItem::new(format!(
-            "Protected paths: {}  |  Inaccessible: {}",
-            report.readonly_paths.len(),
-            report.inaccessible_paths
+        items.push(ListItem::new(Span::styled(
+            "Protected system/mount paths",
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         )));
+        items.extend(report.readonly_paths.iter().map(|path| {
+            ListItem::new(Span::styled(
+                format!("[READONLY] {}", path.display()),
+                Style::default().fg(Color::Red),
+            ))
+        }));
+        items.push(ListItem::new(Line::from(vec![
+            Span::styled("Protected  ", Style::default().fg(Color::Gray)),
+            Span::styled(
+                report.readonly_paths.len().to_string(),
+                Style::default().fg(Color::Red),
+            ),
+            Span::styled("  ·  Inaccessible  ", Style::default().fg(Color::Gray)),
+            Span::styled(
+                report.inaccessible_paths.to_string(),
+                Style::default().fg(Color::Yellow),
+            ),
+        ])));
     } else {
         items.push(ListItem::new("Press [f] to start a full-disk scan."));
     }
@@ -1042,8 +1266,17 @@ fn render_full_disk(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let mut state = ListState::default();
     state.select(selected_index);
     let list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title("Full disk"))
-        .highlight_style(Style::default().bg(Color::DarkGray));
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Full disk / inventory "),
+        )
+        .highlight_symbol("› ")
+        .highlight_style(
+            Style::default()
+                .bg(Color::Rgb(38, 46, 56))
+                .add_modifier(Modifier::BOLD),
+        );
     frame.render_stateful_widget(list, area, &mut state);
 }
 
@@ -1084,32 +1317,38 @@ fn render_directory(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
             items.push(ListItem::new("No readable children."));
         } else {
             items.extend(report.entries.iter().map(|entry| {
-                let marker = if entry.read_only {
-                    "READONLY"
+                let (marker, color) = if entry.read_only {
+                    ("READONLY", Color::Red)
                 } else if entry
                     .suggestion
                     .as_ref()
                     .is_some_and(|suggestion| suggestion.can_delete)
                 {
-                    "SUGGEST"
+                    ("SUGGEST", Color::Green)
                 } else if entry.suggestion.is_some() {
-                    "REVIEW"
+                    ("REVIEW", Color::Yellow)
                 } else if entry.is_dir {
-                    "DIR"
+                    ("DIR", Color::Cyan)
                 } else {
-                    "FILE"
+                    ("FILE", Color::Gray)
                 };
                 let reason = entry
                     .suggestion
                     .as_ref()
                     .map(|suggestion| format!(" — {}", suggestion.reason))
                     .unwrap_or_default();
-                ListItem::new(format!(
-                    "[{marker}] {}  {}{}",
-                    format_size(entry.size_bytes, DECIMAL),
-                    entry.path.display(),
-                    reason
-                ))
+                ListItem::new(Line::from(vec![
+                    Span::styled(
+                        format!("[{marker}]"),
+                        Style::default().fg(color).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        format!("  {}  ", format_size(entry.size_bytes, DECIMAL)),
+                        Style::default().fg(Color::Gray),
+                    ),
+                    Span::raw(entry.path.display().to_string()),
+                    Span::styled(reason, Style::default().fg(Color::Gray)),
+                ]))
             }));
             selected_index = Some(entry_start + app.directory_cursor);
         }
@@ -1127,9 +1366,14 @@ fn render_directory(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title("Directory explorer"),
+                .title(" Explorer / folder "),
         )
-        .highlight_style(Style::default().bg(Color::DarkGray));
+        .highlight_symbol("› ")
+        .highlight_style(
+            Style::default()
+                .bg(Color::Rgb(38, 46, 56))
+                .add_modifier(Modifier::BOLD),
+        );
     frame.render_stateful_widget(list, area, &mut state);
 }
 
@@ -1141,20 +1385,29 @@ fn render_targets(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
             .iter()
             .map(|row| {
                 let checkbox = if row.selected { "[x]" } else { "[ ]" };
+                let checkbox_color = if row.selected {
+                    Color::Green
+                } else {
+                    Color::DarkGray
+                };
                 let risk_style = match row.risk {
                     RiskLevel::Safe => Style::default().fg(Color::Green),
                     RiskLevel::Caution => Style::default().fg(Color::Yellow),
                     RiskLevel::Manual => Style::default().fg(Color::Red),
                 };
                 ListItem::new(Line::from(vec![
-                    Span::raw(format!(
-                        "{checkbox} {} — {} ({}, ",
-                        row.cleaner_name,
-                        row.target.description,
-                        format_size(row.target.size_bytes, DECIMAL),
-                    )),
-                    Span::styled(format!("{:?}", row.risk), risk_style),
-                    Span::raw(")"),
+                    Span::styled(format!("{checkbox} "), Style::default().fg(checkbox_color)),
+                    Span::styled(
+                        row.cleaner_name.as_str(),
+                        Style::default().add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw("  ·  "),
+                    Span::raw(row.target.description.as_str()),
+                    Span::styled(
+                        format!("  ·  {}", format_size(row.target.size_bytes, DECIMAL)),
+                        Style::default().fg(Color::Gray),
+                    ),
+                    Span::styled(format!("  {:?}", row.risk), risk_style),
                 ]))
             })
             .collect()
@@ -1165,7 +1418,12 @@ fn render_targets(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     }
     let list = List::new(items)
         .block(Block::default().borders(Borders::ALL).title("Targets"))
-        .highlight_style(Style::default().bg(Color::DarkGray));
+        .highlight_symbol("› ")
+        .highlight_style(
+            Style::default()
+                .bg(Color::Rgb(38, 46, 56))
+                .add_modifier(Modifier::BOLD),
+        );
     frame.render_stateful_widget(list, area, &mut state);
 }
 
