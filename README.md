@@ -36,7 +36,8 @@ The TUI starts in dry-run mode; press d to switch to execute mode. Pressing y
 in dry-run previews only, keeps the targets visible, and does not pretend that
 files were removed. In execute mode, Safe and Caution targets can be cleaned;
 Manual targets require the explicit FORCE confirmation. After an actual clean,
-the TUI rescans and refreshes the disk snapshot. Press r to reload manually.
+the TUI shows background progress per target, then rescans and refreshes the
+disk snapshot. Press r to reload manually.
 
 Press f for a read-only inventory of the largest root-disk and HOME directories;
 b returns to cleanup targets. Full-disk inventory never creates delete targets.

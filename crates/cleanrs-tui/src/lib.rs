@@ -89,6 +89,10 @@ struct App {
     full_disk_scanning: bool,
     full_disk_error: Option<String>,
     show_full_disk: bool,
+    clean_receiver: Option<Receiver<CleanMessage>>,
+    cleaning_completed: usize,
+    cleaning_total: usize,
+    cleaning_disk_before: Option<DiskUsage>,
     last_action: Option<String>,
 }
 
@@ -109,6 +113,10 @@ impl App {
             full_disk_scanning: false,
             full_disk_error: None,
             show_full_disk: false,
+            clean_receiver: None,
+            cleaning_completed: 0,
+            cleaning_total: 0,
+            cleaning_disk_before: None,
             last_action: None,
         }
     }
@@ -121,6 +129,10 @@ impl App {
         self.expected_scans = expected_scans;
         self.confirm_text.clear();
         self.show_full_disk = false;
+        self.clean_receiver = None;
+        self.cleaning_completed = 0;
+        self.cleaning_total = 0;
+        self.cleaning_disk_before = None;
         self.disk = read_disk_usage().or(self.disk);
     }
 
@@ -200,6 +212,11 @@ enum KeyAction {
     Rescan,
 }
 
+enum CleanMessage {
+    Target(Result<CleanResult, String>),
+    Finished,
+}
+
 fn start_scan() -> (usize, Receiver<CleanerScan>) {
     let cleaners = all_cleaners();
     let expected_scans = cleaners.len();
@@ -224,6 +241,43 @@ fn start_full_disk_scan() -> Receiver<Result<FullDiskScan, String>> {
     receiver
 }
 
+fn start_cleaning(app: &mut App) {
+    let jobs = app
+        .rows
+        .iter()
+        .filter(|row| row.selected)
+        .map(|row| (row.cleaner_id.clone(), row.target.clone()))
+        .collect::<Vec<_>>();
+    let total = jobs.len();
+    let dry_run = app.dry_run;
+    let disk_before = app.disk.or_else(read_disk_usage);
+    let (sender, receiver) = mpsc::channel();
+
+    app.mode = Mode::Cleaning;
+    app.results.clear();
+    app.errors.clear();
+    app.cleaning_completed = 0;
+    app.cleaning_total = total;
+    app.cleaning_disk_before = disk_before;
+    app.clean_receiver = Some(receiver);
+
+    thread::spawn(move || {
+        let cleaners = all_cleaners();
+        for (cleaner_id, target) in jobs {
+            let outcome = match cleaners.iter().find(|cleaner| cleaner.id() == cleaner_id) {
+                Some(cleaner) => cleaner
+                    .clean(&target, dry_run)
+                    .map_err(|error| format!("{cleaner_id}: {error:#}")),
+                None => Err(format!("unknown cleaner {cleaner_id}")),
+            };
+            if sender.send(CleanMessage::Target(outcome)).is_err() {
+                return;
+            }
+        }
+        let _ = sender.send(CleanMessage::Finished);
+    });
+}
+
 fn run_loop(stdout: &mut Stdout) -> Result<()> {
     let (expected_scans, mut receiver) = start_scan();
     let mut full_disk_receiver: Option<Receiver<Result<FullDiskScan, String>>> = None;
@@ -234,6 +288,11 @@ fn run_loop(stdout: &mut Stdout) -> Result<()> {
     let result = loop {
         receive_scans(&mut app, &receiver);
         receive_full_disk_scan(&mut app, &mut full_disk_receiver);
+        if receive_cleaning(&mut app) {
+            let (expected, next_receiver) = start_scan();
+            app.reset_for_scan(expected);
+            receiver = next_receiver;
+        }
         terminal.draw(|frame| render(frame, &app))?;
 
         if event::poll(Duration::from_millis(100))? {
@@ -310,6 +369,78 @@ fn receive_full_disk_scan(
     }
 }
 
+fn receive_cleaning(app: &mut App) -> bool {
+    let Some(receiver) = app.clean_receiver.take() else {
+        return false;
+    };
+
+    let mut finished = false;
+    loop {
+        match receiver.try_recv() {
+            Ok(CleanMessage::Target(outcome)) => {
+                app.cleaning_completed += 1;
+                match outcome {
+                    Ok(result) => app.results.push(result),
+                    Err(error) => app.errors.push(error),
+                }
+            }
+            Ok(CleanMessage::Finished) => {
+                finished = true;
+                break;
+            }
+            Err(TryRecvError::Empty) => break,
+            Err(TryRecvError::Disconnected) => {
+                if app.cleaning_completed < app.cleaning_total {
+                    app.errors
+                        .push("cleanup worker stopped unexpectedly".to_owned());
+                }
+                finished = true;
+                break;
+            }
+        }
+    }
+
+    if !finished {
+        app.clean_receiver = Some(receiver);
+        return false;
+    }
+
+    let dry_run = app.dry_run;
+    let disk_after = read_disk_usage().or(app.cleaning_disk_before);
+    let actual_free_change = match (app.cleaning_disk_before, disk_after) {
+        (Some(before), Some(after)) => after.free_bytes.saturating_sub(before.free_bytes),
+        _ => 0,
+    };
+    let estimated_freed = app
+        .results
+        .iter()
+        .map(|result| result.expected_freed_bytes)
+        .sum::<u64>();
+    app.disk = disk_after;
+    app.last_action = Some(format!(
+        "{} {}/{} target(s), estimated {} freed, actual free change {}; {} error(s); {}",
+        if dry_run { "Previewed" } else { "Cleaned" },
+        app.cleaning_completed,
+        app.cleaning_total,
+        format_size(estimated_freed, DECIMAL),
+        format_size(actual_free_change, DECIMAL),
+        app.errors.len(),
+        if dry_run {
+            "no files changed; targets kept"
+        } else {
+            "scan refreshed"
+        }
+    ));
+    app.cleaning_disk_before = None;
+
+    if dry_run {
+        app.mode = Mode::Reviewing;
+        false
+    } else {
+        true
+    }
+}
+
 fn handle_key(app: &mut App, key: KeyEvent) -> KeyAction {
     if key.code == KeyCode::Char('q') {
         return KeyAction::Quit;
@@ -332,83 +463,27 @@ fn handle_key(app: &mut App, key: KeyEvent) -> KeyAction {
             }
             _ => {}
         },
-        Mode::Confirming => {
-            if handle_confirmation(app, key) {
-                return KeyAction::Rescan;
-            }
-        }
+        Mode::Confirming => handle_confirmation(app, key),
         Mode::Cleaning => {}
     }
     KeyAction::Continue
 }
 
-fn handle_confirmation(app: &mut App, key: KeyEvent) -> bool {
+fn handle_confirmation(app: &mut App, key: KeyEvent) {
     let manual = app.has_manual_selection();
     match key.code {
         KeyCode::Esc | KeyCode::Char('n') => {
             app.confirm_text.clear();
             app.mode = Mode::Reviewing;
         }
-        KeyCode::Char('y') if !manual => execute_selected(app),
-        KeyCode::Enter if manual && app.confirm_text == "FORCE" => execute_selected(app),
+        KeyCode::Char('y') if !manual => start_cleaning(app),
+        KeyCode::Enter if manual && app.confirm_text == "FORCE" => start_cleaning(app),
         KeyCode::Char(character) if manual && !app.dry_run => app.confirm_text.push(character),
         KeyCode::Backspace if manual && !app.dry_run => {
             app.confirm_text.pop();
         }
         _ => {}
     }
-    matches!(app.mode, Mode::Cleaning)
-}
-
-fn execute_selected(app: &mut App) {
-    let dry_run = app.dry_run;
-    app.mode = if dry_run {
-        Mode::Reviewing
-    } else {
-        Mode::Cleaning
-    };
-    app.results.clear();
-    app.errors.clear();
-    let disk_before = app.disk.or_else(read_disk_usage);
-    let cleaners = all_cleaners();
-    for row in app.rows.iter().filter(|row| row.selected) {
-        let Some(cleaner) = cleaners
-            .iter()
-            .find(|cleaner| cleaner.id() == row.cleaner_id)
-        else {
-            app.errors
-                .push(format!("unknown cleaner {}", row.cleaner_id));
-            continue;
-        };
-        match cleaner.clean(&row.target, dry_run) {
-            Ok(result) => app.results.push(result),
-            Err(error) => app.errors.push(format!("{}: {error:#}", row.cleaner_id)),
-        }
-    }
-    let action = if dry_run { "Previewed" } else { "Cleaned" };
-    let estimated_freed = app
-        .results
-        .iter()
-        .map(|result| result.expected_freed_bytes)
-        .sum::<u64>();
-    let disk_after = read_disk_usage().or(disk_before);
-    let actual_free_change = match (disk_before, disk_after) {
-        (Some(before), Some(after)) => after.free_bytes.saturating_sub(before.free_bytes),
-        _ => 0,
-    };
-    app.disk = disk_after;
-    let follow_up = if dry_run {
-        "no files changed; targets kept"
-    } else {
-        "scan refreshed"
-    };
-    app.last_action = Some(format!(
-        "{action} {} target(s), estimated {} freed, actual free change {}; {} error(s); {follow_up}",
-        app.results.len(),
-        format_size(estimated_freed, DECIMAL),
-        format_size(actual_free_change, DECIMAL),
-        app.errors.len()
-    ));
 }
 
 fn render(frame: &mut Frame, app: &App) {
@@ -428,7 +503,10 @@ fn render(frame: &mut Frame, app: &App) {
         ),
         Mode::Reviewing => " cleanrs — review targets ".to_owned(),
         Mode::Confirming => " cleanrs — confirm ".to_owned(),
-        Mode::Cleaning => " cleanrs — cleaning ".to_owned(),
+        Mode::Cleaning => format!(
+            " cleanrs — cleaning {}/{} targets ",
+            app.cleaning_completed, app.cleaning_total
+        ),
     };
     let header = Layout::default()
         .direction(Direction::Vertical)
@@ -675,6 +753,9 @@ fn footer_text(app: &App) -> String {
                 "yes"
             }
         ),
-        Mode::Cleaning => "Working…".to_owned(),
+        Mode::Cleaning => format!(
+            "Cleaning {}/{} target(s) in background… [q] quit",
+            app.cleaning_completed, app.cleaning_total
+        ),
     }
 }
