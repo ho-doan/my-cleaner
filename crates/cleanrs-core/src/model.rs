@@ -8,6 +8,7 @@ pub enum Category {
     SystemCache,
     Container,
     Ide,
+    AiAgent,
     ManualReview,
 }
 

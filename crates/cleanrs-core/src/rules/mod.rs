@@ -1,11 +1,16 @@
+pub mod agent_cache;
 pub mod brew;
 pub mod cargo;
+pub mod claude;
+pub mod codex;
 pub mod dart;
 pub mod docker;
 pub mod gradle;
+pub mod kiro;
 pub mod macos_system;
 pub mod maven;
 pub mod npm;
+pub mod ollama;
 pub mod pip;
 pub mod pnpm;
 pub mod uv;

@@ -38,7 +38,21 @@ impl Cleaner for MacosSystemCleaner {
             &mut targets,
             &home_path("Library/Caches").context("HOME is not set")?,
             "app cache",
-            &["Homebrew", "pip", "Yarn"],
+            &[
+                "Homebrew",
+                "pip",
+                "Yarn",
+                "Codex",
+                "com.openai.codex",
+                "ollama",
+                "aider",
+                "amp",
+                "cursor-agent",
+                "gemini",
+                "goose",
+                "openclaw",
+                "opencode",
+            ],
         )?;
         append_children(
             &mut targets,

@@ -32,7 +32,10 @@ pub struct CleanerScan {
 
 pub fn all_cleaners() -> Vec<Box<dyn Cleaner>> {
     vec![
+        Box::new(rules::agent_cache::AgentCacheCleaner),
         Box::new(rules::cargo::CargoCleaner),
+        Box::new(rules::codex::CodexCleaner),
+        Box::new(rules::claude::ClaudeCleaner),
         Box::new(rules::dart::DartCleaner),
         Box::new(rules::npm::NpmCleaner),
         Box::new(rules::brew::BrewCleaner),
@@ -43,6 +46,8 @@ pub fn all_cleaners() -> Vec<Box<dyn Cleaner>> {
         Box::new(rules::gradle::GradleCleaner),
         Box::new(rules::maven::MavenCleaner),
         Box::new(rules::macos_system::MacosSystemCleaner),
+        Box::new(rules::kiro::KiroCleaner),
+        Box::new(rules::ollama::OllamaCleaner),
         Box::new(rules::xcode::XcodeCleaner),
         Box::new(rules::docker::DockerCleaner),
     ]
