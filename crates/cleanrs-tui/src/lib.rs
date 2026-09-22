@@ -1,7 +1,7 @@
 use anyhow::Result;
 use cleanrs_core::{
-    all_cleaners, full_disk_scan, scan_cleaner, Category, CleanResult, CleanTarget, CleanerScan,
-    FullDiskScan, RiskLevel,
+    all_cleaners, full_disk_scan, scan_cleaner, scan_directory, Category, CleanResult, CleanTarget,
+    CleanerScan, DirectoryScan, DirectoryScanEntry, FullDiskScan, RiskLevel,
 };
 use crossterm::{
     event::{self, Event, KeyCode, KeyEvent, KeyEventKind},
@@ -20,7 +20,7 @@ use ratatui::{
 };
 use std::{
     io::{self, Stdout},
-    path::Path,
+    path::{Path, PathBuf},
     sync::mpsc::{self, Receiver, TryRecvError},
     thread,
     time::Duration,
@@ -89,6 +89,12 @@ struct App {
     full_disk_scanning: bool,
     full_disk_error: Option<String>,
     show_full_disk: bool,
+    full_disk_cursor: usize,
+    directory_scan: Option<DirectoryScan>,
+    directory_scanning: bool,
+    directory_error: Option<String>,
+    directory_history: Vec<std::path::PathBuf>,
+    directory_cursor: usize,
     clean_receiver: Option<Receiver<CleanMessage>>,
     cleaning_completed: usize,
     cleaning_total: usize,
@@ -113,6 +119,12 @@ impl App {
             full_disk_scanning: false,
             full_disk_error: None,
             show_full_disk: false,
+            full_disk_cursor: 0,
+            directory_scan: None,
+            directory_scanning: false,
+            directory_error: None,
+            directory_history: Vec::new(),
+            directory_cursor: 0,
             clean_receiver: None,
             cleaning_completed: 0,
             cleaning_total: 0,
@@ -129,6 +141,12 @@ impl App {
         self.expected_scans = expected_scans;
         self.confirm_text.clear();
         self.show_full_disk = false;
+        self.full_disk_cursor = 0;
+        self.directory_scan = None;
+        self.directory_scanning = false;
+        self.directory_error = None;
+        self.directory_history.clear();
+        self.directory_cursor = 0;
         self.clean_receiver = None;
         self.cleaning_completed = 0;
         self.cleaning_total = 0;
@@ -194,6 +212,46 @@ impl App {
             (self.cursor + delta as usize).min(max)
         };
     }
+
+    fn full_disk_entries(&self) -> Vec<cleanrs_core::DiskScanEntry> {
+        self.full_disk
+            .as_ref()
+            .map(|report| {
+                report
+                    .root_entries
+                    .iter()
+                    .chain(report.home_entries.iter())
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn directory_entries(&self) -> &[DirectoryScanEntry] {
+        self.directory_scan
+            .as_ref()
+            .map(|scan| scan.entries.as_slice())
+            .unwrap_or(&[])
+    }
+
+    fn move_directory_cursor(&mut self, delta: i32) {
+        let len = if self.directory_scan.is_some() {
+            self.directory_entries().len()
+        } else {
+            self.full_disk_entries().len()
+        };
+        if len == 0 {
+            return;
+        }
+        let max = len - 1;
+        self.directory_cursor = if delta.is_negative() {
+            self.directory_cursor
+                .saturating_sub(delta.unsigned_abs() as usize)
+        } else {
+            (self.directory_cursor + delta as usize).min(max)
+        };
+        self.full_disk_cursor = self.directory_cursor;
+    }
 }
 
 fn read_disk_usage() -> Option<DiskUsage> {
@@ -206,8 +264,10 @@ fn read_disk_usage() -> Option<DiskUsage> {
 }
 
 enum KeyAction {
+    BackDirectory,
     Continue,
     FullDisk,
+    OpenDirectory,
     Quit,
     Rescan,
 }
@@ -239,6 +299,27 @@ fn start_full_disk_scan() -> Receiver<Result<FullDiskScan, String>> {
         let _ = sender.send(result);
     });
     receiver
+}
+
+fn start_directory_scan(path: PathBuf) -> Receiver<Result<DirectoryScan, String>> {
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let result = scan_directory(&path, 24).map_err(|error| format!("{error:#}"));
+        let _ = sender.send(result);
+    });
+    receiver
+}
+
+fn queue_directory_scan(
+    app: &mut App,
+    receiver: &mut Option<Receiver<Result<DirectoryScan, String>>>,
+    path: PathBuf,
+) {
+    app.directory_scanning = true;
+    app.directory_error = None;
+    app.directory_scan = None;
+    app.directory_cursor = 0;
+    *receiver = Some(start_directory_scan(path));
 }
 
 fn start_cleaning(app: &mut App) {
@@ -281,6 +362,7 @@ fn start_cleaning(app: &mut App) {
 fn run_loop(stdout: &mut Stdout) -> Result<()> {
     let (expected_scans, mut receiver) = start_scan();
     let mut full_disk_receiver: Option<Receiver<Result<FullDiskScan, String>>> = None;
+    let mut directory_receiver: Option<Receiver<Result<DirectoryScan, String>>> = None;
 
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
@@ -288,6 +370,7 @@ fn run_loop(stdout: &mut Stdout) -> Result<()> {
     let result = loop {
         receive_scans(&mut app, &receiver);
         receive_full_disk_scan(&mut app, &mut full_disk_receiver);
+        receive_directory_scan(&mut app, &mut directory_receiver);
         if receive_cleaning(&mut app) {
             let (expected, next_receiver) = start_scan();
             app.reset_for_scan(expected);
@@ -299,13 +382,68 @@ fn run_loop(stdout: &mut Stdout) -> Result<()> {
             if let Event::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press {
                     match handle_key(&mut app, key) {
+                        KeyAction::BackDirectory => {
+                            if app.directory_scanning {
+                                continue;
+                            }
+                            if let Some(previous) = app.directory_history.pop() {
+                                if previous == Path::new("/") {
+                                    app.directory_scan = None;
+                                    app.directory_error = None;
+                                    app.directory_cursor = 0;
+                                } else {
+                                    queue_directory_scan(
+                                        &mut app,
+                                        &mut directory_receiver,
+                                        previous,
+                                    );
+                                }
+                            } else {
+                                app.show_full_disk = false;
+                                app.directory_scan = None;
+                                app.directory_error = None;
+                                app.directory_cursor = 0;
+                            }
+                        }
                         KeyAction::Quit => break Ok(()),
                         KeyAction::FullDisk => {
                             if !app.full_disk_scanning {
                                 app.full_disk_scanning = true;
                                 app.full_disk_error = None;
                                 app.show_full_disk = true;
+                                app.full_disk_cursor = 0;
+                                app.directory_scan = None;
+                                app.directory_scanning = false;
+                                app.directory_error = None;
+                                app.directory_history.clear();
+                                app.directory_cursor = 0;
+                                directory_receiver = None;
                                 full_disk_receiver = Some(start_full_disk_scan());
+                            }
+                        }
+                        KeyAction::OpenDirectory => {
+                            if app.directory_scanning {
+                                continue;
+                            }
+                            let selected_path = if let Some(scan) = &app.directory_scan {
+                                scan.entries
+                                    .get(app.directory_cursor)
+                                    .filter(|entry| entry.is_dir && !entry.read_only)
+                                    .map(|entry| entry.path.clone())
+                            } else {
+                                app.full_disk_entries()
+                                    .get(app.full_disk_cursor)
+                                    .filter(|entry| entry.path.is_dir())
+                                    .map(|entry| entry.path.clone())
+                            };
+                            if let Some(path) = selected_path {
+                                let current = app
+                                    .directory_scan
+                                    .as_ref()
+                                    .map(|scan| scan.path.clone())
+                                    .unwrap_or_else(|| PathBuf::from("/"));
+                                app.directory_history.push(current);
+                                queue_directory_scan(&mut app, &mut directory_receiver, path);
                             }
                         }
                         KeyAction::Rescan => {
@@ -363,6 +501,33 @@ fn receive_full_disk_scan(
         Some(Err(TryRecvError::Disconnected)) => {
             app.full_disk_scanning = false;
             app.full_disk_error = Some("full-disk scan stopped unexpectedly".to_owned());
+            *receiver = None;
+        }
+        Some(Err(TryRecvError::Empty)) | None => {}
+    }
+}
+
+fn receive_directory_scan(
+    app: &mut App,
+    receiver: &mut Option<Receiver<Result<DirectoryScan, String>>>,
+) {
+    let message = receiver.as_ref().map(|channel| channel.try_recv());
+    match message {
+        Some(Ok(Ok(report))) => {
+            app.directory_scan = Some(report);
+            app.directory_scanning = false;
+            app.directory_error = None;
+            app.directory_cursor = 0;
+            *receiver = None;
+        }
+        Some(Ok(Err(error))) => {
+            app.directory_scanning = false;
+            app.directory_error = Some(error);
+            *receiver = None;
+        }
+        Some(Err(TryRecvError::Disconnected)) => {
+            app.directory_scanning = false;
+            app.directory_error = Some("directory scan stopped unexpectedly".to_owned());
             *receiver = None;
         }
         Some(Err(TryRecvError::Empty)) | None => {}
@@ -448,21 +613,41 @@ fn handle_key(app: &mut App, key: KeyEvent) -> KeyAction {
 
     match app.mode {
         Mode::Scanning => {}
-        Mode::Reviewing => match key.code {
-            KeyCode::Down | KeyCode::Char('j') => app.move_cursor(1),
-            KeyCode::Up | KeyCode::Char('k') => app.move_cursor(-1),
-            KeyCode::Char(' ') => app.toggle_current(),
-            KeyCode::Char('a') => app.select_all_safe(),
-            KeyCode::Char('d') => app.dry_run = !app.dry_run,
-            KeyCode::Char('f') => return KeyAction::FullDisk,
-            KeyCode::Char('b') if app.show_full_disk => app.show_full_disk = false,
-            KeyCode::Char('r') => return KeyAction::Rescan,
-            KeyCode::Enter if app.selected_count() > 0 => {
-                app.confirm_text.clear();
-                app.mode = Mode::Confirming;
+        Mode::Reviewing => {
+            if app.show_full_disk {
+                if app.directory_scanning {
+                    match key.code {
+                        KeyCode::Char('b') => return KeyAction::BackDirectory,
+                        KeyCode::Char('f') => return KeyAction::FullDisk,
+                        _ => {}
+                    }
+                } else {
+                    match key.code {
+                        KeyCode::Down | KeyCode::Char('j') => app.move_directory_cursor(1),
+                        KeyCode::Up | KeyCode::Char('k') => app.move_directory_cursor(-1),
+                        KeyCode::Enter => return KeyAction::OpenDirectory,
+                        KeyCode::Char('b') => return KeyAction::BackDirectory,
+                        KeyCode::Char('f') => return KeyAction::FullDisk,
+                        _ => {}
+                    }
+                }
+            } else {
+                match key.code {
+                    KeyCode::Down | KeyCode::Char('j') => app.move_cursor(1),
+                    KeyCode::Up | KeyCode::Char('k') => app.move_cursor(-1),
+                    KeyCode::Char(' ') => app.toggle_current(),
+                    KeyCode::Char('a') => app.select_all_safe(),
+                    KeyCode::Char('d') => app.dry_run = !app.dry_run,
+                    KeyCode::Char('f') => return KeyAction::FullDisk,
+                    KeyCode::Char('r') => return KeyAction::Rescan,
+                    KeyCode::Enter if app.selected_count() > 0 => {
+                        app.confirm_text.clear();
+                        app.mode = Mode::Confirming;
+                    }
+                    _ => {}
+                }
             }
-            _ => {}
-        },
+        }
         Mode::Confirming => handle_confirmation(app, key),
         Mode::Cleaning => {}
     }
@@ -549,7 +734,11 @@ fn render(frame: &mut Frame, app: &App) {
         .split(vertical[1]);
     render_sidebar(frame, app, body[0]);
     if app.show_full_disk {
-        render_full_disk(frame, app, body[1]);
+        if app.directory_scan.is_some() || app.directory_scanning || app.directory_error.is_some() {
+            render_directory(frame, app, body[1]);
+        } else {
+            render_full_disk(frame, app, body[1]);
+        }
     } else {
         render_targets(frame, app, body[1]);
     }
@@ -622,6 +811,33 @@ fn render_sidebar(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     } else {
         lines.push(Line::from("Press [f] to scan"));
     }
+    if app.show_full_disk {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Explorer",
+            Style::default().add_modifier(Modifier::BOLD),
+        )));
+        if app.directory_scanning {
+            lines.push(Line::from("Scanning folder…"));
+        } else if let Some(report) = &app.directory_scan {
+            lines.push(Line::from(report.path.display().to_string()));
+            lines.push(Line::from(if !report.is_git_repo {
+                "Git: not a repository"
+            } else if report.git_dirty {
+                "Git: DIRTY"
+            } else {
+                "Git: clean"
+            }));
+            let suggestions = report
+                .entries
+                .iter()
+                .filter(|entry| entry.suggestion.is_some())
+                .count();
+            lines.push(Line::from(format!("Suggestions: {suggestions}")));
+        } else {
+            lines.push(Line::from("Enter opens selected folder"));
+        }
+    }
     if let Some(action) = &app.last_action {
         lines.push(Line::from(""));
         lines.push(Line::from(action.as_str()));
@@ -634,13 +850,17 @@ fn render_sidebar(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
 
 fn render_full_disk(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let mut items = Vec::new();
-    items.push(ListItem::new("Read-only inventory — no delete targets"));
+    let mut selected_index = None;
+    items.push(ListItem::new(
+        "Inventory — Enter opens folders; no direct delete",
+    ));
 
     if app.full_disk_scanning {
         items.push(ListItem::new("Scanning root disk and HOME in background…"));
     } else if let Some(error) = &app.full_disk_error {
         items.push(ListItem::new(format!("Scan error: {error}")));
     } else if let Some(report) = &app.full_disk {
+        let root_start = 2;
         items.push(ListItem::new("Largest root entries:"));
         items.extend(report.root_entries.iter().map(|entry| {
             ListItem::new(format!(
@@ -649,12 +869,13 @@ fn render_full_disk(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
                 if entry.read_only {
                     "READONLY"
                 } else {
-                    "deletable"
+                    "REVIEW"
                 },
                 entry.path.display()
             ))
         }));
         items.push(ListItem::new(""));
+        let home_start = root_start + report.root_entries.len() + 2;
         items.push(ListItem::new("Largest HOME entries:"));
         items.extend(report.home_entries.iter().map(|entry| {
             ListItem::new(format!(
@@ -663,12 +884,19 @@ fn render_full_disk(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
                 if entry.read_only {
                     "READONLY"
                 } else {
-                    "deletable"
+                    "REVIEW"
                 },
                 entry.path.display()
             ))
         }));
-        items.push(ListItem::new("Read-only system/mount paths:"));
+        if !report.root_entries.is_empty() || !report.home_entries.is_empty() {
+            selected_index = if app.full_disk_cursor < report.root_entries.len() {
+                Some(root_start + app.full_disk_cursor)
+            } else {
+                Some(home_start + app.full_disk_cursor - report.root_entries.len())
+            };
+        }
+        items.push(ListItem::new("Protected system/mount paths:"));
         items.extend(
             report
                 .readonly_paths
@@ -676,7 +904,7 @@ fn render_full_disk(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
                 .map(|path| ListItem::new(format!("[READONLY] {}", path.display()))),
         );
         items.push(ListItem::new(format!(
-            "Read-only paths: {}  |  Inaccessible: {}",
+            "Protected paths: {}  |  Inaccessible: {}",
             report.readonly_paths.len(),
             report.inaccessible_paths
         )));
@@ -684,10 +912,88 @@ fn render_full_disk(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         items.push(ListItem::new("Press [f] to start a full-disk scan."));
     }
 
+    let mut state = ListState::default();
+    state.select(selected_index);
     let list = List::new(items)
         .block(Block::default().borders(Borders::ALL).title("Full disk"))
         .highlight_style(Style::default().bg(Color::DarkGray));
-    frame.render_widget(list, area);
+    frame.render_stateful_widget(list, area, &mut state);
+}
+
+fn render_directory(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
+    let mut items = Vec::new();
+    let mut selected_index = None;
+    let path = app
+        .directory_scan
+        .as_ref()
+        .map(|scan| scan.path.display().to_string())
+        .unwrap_or_else(|| "loading…".to_owned());
+    items.push(ListItem::new(format!("Path: {path}")));
+
+    if app.directory_scanning {
+        items.push(ListItem::new(
+            "Git/status and children are scanning in background…",
+        ));
+    } else if let Some(error) = &app.directory_error {
+        items.push(ListItem::new(format!("Scan error: {error}")));
+    } else if let Some(report) = &app.directory_scan {
+        let git_status = if !report.is_git_repo {
+            "Git: not a repository"
+        } else if report.git_dirty {
+            "Git: DIRTY — preserve source changes"
+        } else {
+            "Git: clean — generated folders may be regenerated"
+        };
+        items.push(ListItem::new(git_status));
+        items.push(ListItem::new(
+            "Entries — Enter opens folders; suggestions require approved cleanup rules",
+        ));
+        let entry_start = items.len();
+        if report.entries.is_empty() {
+            items.push(ListItem::new("No readable children."));
+        } else {
+            items.extend(report.entries.iter().map(|entry| {
+                let marker = if entry.read_only {
+                    "READONLY"
+                } else if entry.suggestion.is_some() {
+                    "SUGGEST"
+                } else if entry.is_dir {
+                    "DIR"
+                } else {
+                    "FILE"
+                };
+                let reason = entry
+                    .suggestion
+                    .as_ref()
+                    .map(|suggestion| format!(" — {}", suggestion.reason))
+                    .unwrap_or_default();
+                ListItem::new(format!(
+                    "[{marker}] {}  {}{}",
+                    format_size(entry.size_bytes, DECIMAL),
+                    entry.path.display(),
+                    reason
+                ))
+            }));
+            selected_index = Some(entry_start + app.directory_cursor);
+        }
+        items.push(ListItem::new(format!(
+            "Inaccessible: {}",
+            report.inaccessible_paths
+        )));
+    } else {
+        items.push(ListItem::new("Press [enter] to open a selected folder."));
+    }
+
+    let mut state = ListState::default();
+    state.select(selected_index);
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Directory explorer"),
+        )
+        .highlight_style(Style::default().bg(Color::DarkGray));
+    frame.render_stateful_widget(list, area, &mut state);
 }
 
 fn render_targets(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
@@ -731,12 +1037,20 @@ fn footer_text(app: &App) -> String {
         Mode::Scanning => "Scanning in background…  [q] quit".to_owned(),
         Mode::Reviewing => {
             if app.show_full_disk {
-                return "Full-disk inventory is read-only. [f] rescan  [b] back to targets  [q] quit"
+                if app.directory_scanning {
+                    return "Scanning folder in background… [b] back  [q] quit".to_owned();
+                }
+                if app.directory_scan.is_some() {
+                    return "Directory explorer: [↑/↓] move  [enter] open  [b] back  [f] root scan  [q] quit"
+                        .to_owned();
+                }
+                return "Full-disk inventory: [↑/↓] choose  [enter] open  [b] back to targets  [f] rescan  [q] quit"
                     .to_owned();
             }
             let action = app.last_action.as_deref().unwrap_or("Ready for review");
             format!(
-                "{action}\n[↑/↓] move  [space] toggle  [a] select Safe  [d] dry-run  [r] reload  [f] full disk  [enter] continue  [q] quit"
+                "{action}
+[↑/↓] move  [space] toggle  [a] select Safe  [d] dry-run  [r] reload  [f] full disk  [enter] continue  [q] quit"
             )
         }
         Mode::Confirming if app.has_manual_selection() && !app.dry_run => format!(

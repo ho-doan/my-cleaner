@@ -1,4 +1,7 @@
-use crate::model::{CleanMethod, CleanResult, CleanTarget};
+use crate::{
+    is_protected_path,
+    model::{CleanMethod, CleanResult, CleanTarget},
+};
 use anyhow::{bail, Context, Result};
 use std::{
     io::Write,
@@ -6,6 +9,13 @@ use std::{
 };
 
 pub fn clean_target(cleaner_id: &str, target: &CleanTarget, dry_run: bool) -> Result<CleanResult> {
+    if is_protected_path(&target.path) {
+        bail!(
+            "refusing to clean protected system path: {}",
+            target.path.display()
+        );
+    }
+
     if dry_run {
         return Ok(CleanResult {
             cleaner_id: cleaner_id.to_owned(),
@@ -115,5 +125,19 @@ mod tests {
 
         assert!(result.executed);
         assert!(result.success);
+    }
+
+    #[test]
+    fn refuses_protected_system_paths() {
+        let target = CleanTarget {
+            path: PathBuf::from("/System/Library"),
+            size_bytes: 1,
+            description: "protected path".to_owned(),
+            method: CleanMethod::TrashPath,
+        };
+
+        let error = clean_target("test", &target, false).expect_err("path must be rejected");
+
+        assert!(error.to_string().contains("protected system path"));
     }
 }

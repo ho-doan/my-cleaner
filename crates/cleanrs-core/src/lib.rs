@@ -12,4 +12,7 @@ pub mod scanner;
 
 pub use cleaner::{all_cleaners, scan_all, scan_cleaner, Cleaner, CleanerScan};
 pub use model::{Category, CleanMethod, CleanResult, CleanTarget, RiskLevel};
-pub use scanner::{dir_size, full_disk_scan, DiskScanEntry, FullDiskScan};
+pub use scanner::{
+    dir_size, full_disk_scan, is_protected_path, scan_directory, DirectoryScan, DirectoryScanEntry,
+    DirectorySuggestion, DiskScanEntry, FullDiskScan,
+};

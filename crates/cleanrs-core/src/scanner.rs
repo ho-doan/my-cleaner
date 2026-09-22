@@ -3,12 +3,17 @@ use jwalk::WalkDir;
 use rayon::prelude::*;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 #[derive(Clone, Debug, Serialize)]
 pub struct DiskScanEntry {
     pub path: PathBuf,
     pub size_bytes: u64,
-    /// Full-disk inventory entries are informational only and never deletable.
+    /// The path is protected by the system-safety policy.
+    ///
+    /// A `false` value does not make an inventory row directly deletable: the
+    /// full-disk scan is still informational and cleanup must go through an
+    /// approved `CleanTarget`.
     pub read_only: bool,
 }
 
@@ -20,6 +25,29 @@ pub struct FullDiskScan {
     /// System and mount paths intentionally not traversed by the inventory.
     /// They are surfaced as read-only instead of becoming delete targets.
     pub readonly_paths: Vec<PathBuf>,
+    pub inaccessible_paths: usize,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct DirectorySuggestion {
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct DirectoryScanEntry {
+    pub path: PathBuf,
+    pub size_bytes: u64,
+    pub is_dir: bool,
+    pub read_only: bool,
+    pub suggestion: Option<DirectorySuggestion>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DirectoryScan {
+    pub path: PathBuf,
+    pub entries: Vec<DirectoryScanEntry>,
+    pub is_git_repo: bool,
+    pub git_dirty: bool,
     pub inaccessible_paths: usize,
 }
 
@@ -84,6 +112,172 @@ pub fn full_disk_scan(root: &Path, limit: usize) -> Result<FullDiskScan> {
     })
 }
 
+/// Returns whether a path belongs to a protected system or mount tree.
+///
+/// User-owned paths such as `~/Library/Developer/CoreSimulator` are not
+/// protected by this policy. They can be inspected and may receive a cleanup
+/// suggestion, while still requiring an approved cleaner before deletion.
+pub fn is_protected_path(path: &Path) -> bool {
+    [
+        "/System", "/Volumes", "/private", "/dev", "/cores", "/usr", "/bin", "/sbin",
+    ]
+    .into_iter()
+    .map(Path::new)
+    .any(|protected| path == protected || path.starts_with(protected))
+}
+
+/// Scan one directory level for an interactive, read-only explorer.
+///
+/// Directory sizes are calculated recursively, but only immediate children are
+/// returned. Known regenerable folders receive a deletion suggestion; no
+/// suggestion is a delete authorization or a `CleanTarget`.
+pub fn scan_directory(path: &Path, limit: usize) -> Result<DirectoryScan> {
+    if !path.is_dir() {
+        anyhow::bail!("directory scan path is not a directory: {}", path.display());
+    }
+
+    let readonly_paths = if path == Path::new("/") {
+        excluded_root_paths(path)
+    } else {
+        Vec::new()
+    };
+    let children = std::fs::read_dir(path)?
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .collect::<Vec<_>>();
+    let (is_git_repo, git_dirty) = git_context(path);
+
+    let results = children
+        .into_par_iter()
+        .map(|child| {
+            if readonly_paths.contains(&child) {
+                return (
+                    Some(DirectoryScanEntry {
+                        path: child,
+                        size_bytes: 0,
+                        is_dir: true,
+                        read_only: true,
+                        suggestion: None,
+                    }),
+                    0usize,
+                );
+            }
+
+            let Ok(metadata) = std::fs::symlink_metadata(&child) else {
+                return (None, 1usize);
+            };
+            let is_dir = metadata.is_dir();
+            let (size_bytes, inaccessible) = if is_dir {
+                tolerant_dir_size(&child)
+            } else if metadata.file_type().is_file() {
+                (metadata.len(), 0)
+            } else {
+                (0, 0)
+            };
+            let read_only =
+                is_protected_path(&child) || child.file_name().is_some_and(|name| name == ".git");
+            let suggestion = (!read_only)
+                .then(|| {
+                    if is_dir {
+                        directory_suggestion(&child)
+                    } else {
+                        file_suggestion(&child)
+                    }
+                })
+                .flatten();
+            (
+                Some(DirectoryScanEntry {
+                    path: child,
+                    size_bytes,
+                    is_dir,
+                    read_only,
+                    suggestion,
+                }),
+                inaccessible,
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let inaccessible_paths = results.iter().map(|(_, count)| count).sum();
+    let mut entries = results
+        .into_iter()
+        .filter_map(|(entry, _)| entry)
+        .collect::<Vec<_>>();
+    entries.sort_by_key(|entry| (!entry.read_only, std::cmp::Reverse(entry.size_bytes)));
+
+    let readonly_entries = entries
+        .iter()
+        .filter(|entry| entry.read_only)
+        .cloned()
+        .collect::<Vec<_>>();
+    entries.retain(|entry| !entry.read_only);
+    entries.truncate(limit);
+    entries.extend(readonly_entries);
+
+    Ok(DirectoryScan {
+        path: path.to_path_buf(),
+        entries,
+        is_git_repo,
+        git_dirty,
+        inaccessible_paths,
+    })
+}
+
+fn git_context(path: &Path) -> (bool, bool) {
+    let Ok(output) = Command::new("git")
+        .args(["-C"])
+        .arg(path)
+        .args(["status", "--porcelain", "--untracked-files=normal"])
+        .output()
+    else {
+        return (false, false);
+    };
+    if !output.status.success() {
+        return (false, false);
+    }
+    (
+        true,
+        !String::from_utf8_lossy(&output.stdout).trim().is_empty(),
+    )
+}
+
+fn directory_suggestion(path: &Path) -> Option<DirectorySuggestion> {
+    let name = path.file_name()?.to_string_lossy();
+    let reason = match name.as_ref() {
+        "node_modules" => "regenerable Node dependencies",
+        "target" => "Rust build artifacts",
+        ".dart_tool" => "Dart/Flutter tool cache",
+        "build" => "generated build output",
+        "coverage" => "generated test coverage",
+        ".next" => "Next.js build output",
+        ".nuxt" => "Nuxt build output",
+        ".turbo" => "Turborepo cache",
+        ".gradle" => "Gradle project cache",
+        "Pods" => "CocoaPods dependencies",
+        ".venv" => "Python virtual environment",
+        "__pycache__" => "Python bytecode cache",
+        ".pytest_cache" => "pytest cache",
+        "DerivedData" => "Xcode build intermediates",
+        "CoreSimulator" => "iOS Simulator data; review devices and runtimes before deleting",
+        _ => return None,
+    };
+    Some(DirectorySuggestion {
+        reason: reason.to_owned(),
+    })
+}
+
+fn file_suggestion(path: &Path) -> Option<DirectorySuggestion> {
+    let name = path.file_name()?.to_string_lossy();
+    let reason = match name.as_ref() {
+        ".claude.json" | ".claude.json.backup" => {
+            "Claude config; verify the CLI/app is no longer used"
+        }
+        _ => return None,
+    };
+    Some(DirectorySuggestion {
+        reason: reason.to_owned(),
+    })
+}
+
 fn excluded_root_paths(root: &Path) -> Vec<PathBuf> {
     [
         "System", "Volumes", "private", "dev", "cores", "usr", "bin", "sbin",
@@ -107,10 +301,11 @@ fn scan_children(parent: &Path, excluded: &[PathBuf]) -> Result<(Vec<DiskScanEnt
             }
 
             let (size_bytes, inaccessible) = tolerant_dir_size(&path);
+            let read_only = is_protected_path(&path);
             let entry = (size_bytes > 0).then_some(DiskScanEntry {
                 path,
                 size_bytes,
-                read_only: true,
+                read_only,
             });
             (entry, inaccessible)
         })
@@ -151,7 +346,7 @@ fn tolerant_dir_size(path: &Path) -> (u64, usize) {
 
 #[cfg(test)]
 mod tests {
-    use super::dir_size;
+    use super::{dir_size, is_protected_path, scan_directory};
     use std::fs;
     use tempfile::tempdir;
 
@@ -172,5 +367,65 @@ mod tests {
             dir_size(&root.path().join("missing")).expect("directory size"),
             0
         );
+    }
+
+    #[test]
+    fn directory_scan_suggests_regenerable_folders() {
+        let root = tempdir().expect("temporary directory");
+        let node_modules = root.path().join("node_modules");
+        fs::create_dir(&node_modules).expect("node_modules directory");
+        fs::write(node_modules.join("package.json"), b"{}").expect("dependency marker");
+
+        let report = scan_directory(root.path(), 10).expect("directory scan");
+        let entry = report
+            .entries
+            .iter()
+            .find(|entry| entry.path == node_modules)
+            .expect("node_modules entry");
+
+        assert!(entry.is_dir);
+        assert_eq!(
+            entry
+                .suggestion
+                .as_ref()
+                .map(|suggestion| suggestion.reason.as_str()),
+            Some("regenerable Node dependencies")
+        );
+        assert!(!report.is_git_repo);
+    }
+
+    #[test]
+    fn home_data_is_reviewable_not_system_read_only() {
+        assert!(is_protected_path(std::path::Path::new("/System/Library")));
+        assert!(is_protected_path(std::path::Path::new("/private/var")));
+        assert!(!is_protected_path(std::path::Path::new(
+            "/Users/test/Library/Developer/CoreSimulator"
+        )));
+    }
+
+    #[test]
+    fn directory_scan_suggests_simulator_data_and_stale_claude_config() {
+        let root = tempdir().expect("temporary directory");
+        let simulator = root.path().join("CoreSimulator");
+        fs::create_dir(&simulator).expect("CoreSimulator directory");
+        fs::write(simulator.join("device.db"), b"simulator data").expect("device data");
+        fs::write(root.path().join(".claude.json"), b"{}").expect("Claude config");
+
+        let report = scan_directory(root.path(), 10).expect("directory scan");
+        let simulator_entry = report
+            .entries
+            .iter()
+            .find(|entry| entry.path == simulator)
+            .expect("CoreSimulator entry");
+        let claude_entry = report
+            .entries
+            .iter()
+            .find(|entry| entry.path == root.path().join(".claude.json"))
+            .expect("Claude config entry");
+
+        assert!(!simulator_entry.read_only);
+        assert!(simulator_entry.suggestion.is_some());
+        assert!(!claude_entry.read_only);
+        assert!(claude_entry.suggestion.is_some());
     }
 }

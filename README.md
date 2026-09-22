@@ -39,7 +39,12 @@ Manual targets require the explicit FORCE confirmation. After an actual clean,
 the TUI shows background progress per target, then rescans and refreshes the
 disk snapshot. Press r to reload manually.
 
-Press f for a read-only inventory of the largest root-disk and HOME directories;
-b returns to cleanup targets. Full-disk inventory never creates delete targets.
-Every inventory row and every excluded system/mount path is explicitly marked
-`READONLY`.
+Press f for an inventory of the largest root-disk and HOME directories; b
+returns to cleanup targets. From the inventory, press Enter on a folder to scan
+its children in the background; use Enter again to drill down and b to go back.
+Git repositories show clean/dirty status, and regenerable directories such as
+`node_modules`, `target`, `.dart_tool`, `CoreSimulator`, and build caches are
+marked as `SUGGEST` only. User-owned inventory rows are `REVIEW`: they can be
+inspected but are never direct delete targets. Protected system/mount paths are
+the only `READONLY` rows. Full-disk inventory never creates delete targets;
+cleanup still requires an approved cleaner rule and confirmation.
