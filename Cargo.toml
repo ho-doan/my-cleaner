@@ -1,0 +1,7 @@
+[workspace]
+members = [
+    "crates/cleanrs-core",
+    "crates/cleanrs-cli",
+]
+resolver = "2"
+

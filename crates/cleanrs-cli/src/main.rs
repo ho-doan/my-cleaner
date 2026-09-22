@@ -1,0 +1,235 @@
+use anyhow::{bail, Result};
+use clap::{Args, Parser, Subcommand};
+use cleanrs_core::{all_cleaners, scan_all, CleanResult, Cleaner, CleanerScan};
+use comfy_table::{presets::UTF8_FULL, Table};
+use humansize::{format_size, DECIMAL};
+use serde::Serialize;
+
+#[derive(Debug, Parser)]
+#[command(name = "cleanrs", version, about = "Safe, rule-based disk cleanup")]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// Scan available cleaners without changing files.
+    Scan(ScanArgs),
+    /// Preview or execute cleaning for selected cleaners.
+    Clean(CleanArgs),
+    /// List registered cleaners and whether their command is available.
+    List,
+}
+
+#[derive(Debug, Args)]
+struct ScanArgs {
+    /// Comma-separated cleaner IDs, for example: npm,brew.
+    #[arg(long, value_delimiter = ',')]
+    only: Option<Vec<String>>,
+    /// Emit machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct CleanArgs {
+    /// Comma-separated cleaner IDs, for example: npm.
+    #[arg(long, value_delimiter = ',')]
+    only: Option<Vec<String>>,
+    /// Explicitly keep this operation as a preview.
+    #[arg(long)]
+    dry_run: bool,
+    /// Execute commands. Without this flag clean is always a dry-run.
+    #[arg(long)]
+    yes: bool,
+    /// Emit machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct CleanOutput {
+    dry_run: bool,
+    results: Vec<CleanResult>,
+    errors: Vec<String>,
+}
+
+fn main() -> Result<()> {
+    let cli = Cli::parse();
+    match cli.command {
+        Command::Scan(args) => scan_command(args),
+        Command::Clean(args) => clean_command(args),
+        Command::List => list_command(),
+    }
+}
+
+fn scan_command(args: ScanArgs) -> Result<()> {
+    if let Some(ids) = args.only.as_deref() {
+        selected_cleaners(Some(ids))?;
+    }
+    let reports = scan_all(args.only.as_deref());
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&reports)?);
+    } else {
+        print_scan_table(&reports);
+    }
+    Ok(())
+}
+
+fn clean_command(args: CleanArgs) -> Result<()> {
+    let dry_run = !args.yes || args.dry_run;
+    let selected = selected_cleaners(args.only.as_deref())?;
+    let mut results = Vec::new();
+    let mut errors = Vec::new();
+
+    for cleaner in selected {
+        if !cleaner.is_available() {
+            continue;
+        }
+
+        let targets = match cleaner.scan() {
+            Ok(targets) => targets,
+            Err(error) => {
+                errors.push(format!("{}: {error:#}", cleaner.id()));
+                continue;
+            }
+        };
+
+        for target in targets {
+            match cleaner.clean(&target, dry_run) {
+                Ok(result) => results.push(result),
+                Err(error) => errors.push(format!("{}: {error:#}", cleaner.id())),
+            }
+        }
+    }
+
+    let output = CleanOutput {
+        dry_run,
+        results,
+        errors,
+    };
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else {
+        print_clean_output(&output);
+    }
+
+    if !output.errors.is_empty() {
+        bail!("one or more cleaners failed");
+    }
+    Ok(())
+}
+
+fn list_command() -> Result<()> {
+    let mut table = Table::new();
+    table.load_preset(UTF8_FULL);
+    table.set_header(["ID", "Cleaner", "Category", "Risk", "Available"]);
+
+    for cleaner in all_cleaners() {
+        table.add_row([
+            cleaner.id().to_owned(),
+            cleaner.display_name().to_owned(),
+            format!("{:?}", cleaner.category()),
+            format!("{:?}", cleaner.risk_level()),
+            cleaner.is_available().to_string(),
+        ]);
+    }
+
+    println!("{table}");
+    Ok(())
+}
+
+fn selected_cleaners(only: Option<&[String]>) -> Result<Vec<Box<dyn Cleaner>>> {
+    let cleaners = all_cleaners();
+    let Some(ids) = only else {
+        return Ok(cleaners);
+    };
+
+    let normalized = ids
+        .iter()
+        .map(|id| id.to_ascii_lowercase())
+        .collect::<std::collections::HashSet<_>>();
+    let mut selected = Vec::new();
+    let mut found = std::collections::HashSet::new();
+
+    for cleaner in cleaners {
+        if normalized.contains(cleaner.id()) {
+            found.insert(cleaner.id().to_owned());
+            selected.push(cleaner);
+        }
+    }
+
+    let unknown = normalized.difference(&found).cloned().collect::<Vec<_>>();
+    if !unknown.is_empty() {
+        bail!("unknown cleaner(s): {}", unknown.join(", "));
+    }
+    Ok(selected)
+}
+
+fn print_scan_table(reports: &[CleanerScan]) {
+    let mut table = Table::new();
+    table.load_preset(UTF8_FULL);
+    table.set_header(["Cleaner", "Target", "Size", "Risk", "Path"]);
+
+    for report in reports {
+        if let Some(error) = &report.error {
+            table.add_row([
+                report.display_name.clone(),
+                "scan error".to_owned(),
+                "-".to_owned(),
+                format!("{:?}", report.risk_level),
+                error.clone(),
+            ]);
+        } else if !report.available {
+            table.add_row([
+                report.display_name.clone(),
+                "unavailable".to_owned(),
+                "-".to_owned(),
+                format!("{:?}", report.risk_level),
+                "-".to_owned(),
+            ]);
+        } else if report.targets.is_empty() {
+            table.add_row([
+                report.display_name.clone(),
+                "nothing to clean".to_owned(),
+                "0 B".to_owned(),
+                format!("{:?}", report.risk_level),
+                "-".to_owned(),
+            ]);
+        } else {
+            for target in &report.targets {
+                table.add_row([
+                    report.display_name.clone(),
+                    target.description.clone(),
+                    format_size(target.size_bytes, DECIMAL),
+                    format!("{:?}", report.risk_level),
+                    target.path.display().to_string(),
+                ]);
+            }
+        }
+    }
+
+    println!("{table}");
+}
+
+fn print_clean_output(output: &CleanOutput) {
+    if output.dry_run {
+        println!("Dry-run: no command was executed.");
+    }
+
+    for result in &output.results {
+        let status = if result.dry_run { "preview" } else { "cleaned" };
+        println!(
+            "[{status}] {} — {} ({})",
+            result.cleaner_id,
+            result.target,
+            format_size(result.expected_freed_bytes, DECIMAL)
+        );
+    }
+
+    for error in &output.errors {
+        eprintln!("[error] {error}");
+    }
+}
