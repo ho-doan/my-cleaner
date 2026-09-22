@@ -45,9 +45,11 @@ its children in the background; use Enter again to drill down and b to go back.
 Git repositories show clean/dirty status, and regenerable directories such as
 `node_modules`, `target`, `.dart_tool`, and build caches are marked as
 `SUGGEST`. `CoreSimulator` and app/config data remain `REVIEW`: they can be
-inspected but are not whole-folder delete targets. Protected system/mount paths
-are the only `READONLY` rows. Full-disk inventory never creates delete targets;
-cleanup still requires an approved cleaner rule and confirmation. Inside a
-directory, select a non-protected file or a safe `SUGGEST` folder and press x
-to move the item to Trash after confirmation. Protected paths and sensitive
-folders such as `CoreSimulator` remain review-only.
+inspected but are not whole-folder delete targets. Protected system/mount roots
+are shown as `READONLY` with their recursively calculated size, and can be
+opened for inspection. Full-disk inventory still never creates delete targets;
+cleanup requires an explicit explorer selection and confirmation. Inside a
+directory, select a non-protected file, a safe `SUGGEST` folder, a core dump, or
+an individual system-temp file under `/private/tmp` or `/private/var/tmp`, then
+press x to move it to Trash. System roots, mounted volumes, databases, swap,
+and sensitive folders remain review-only.

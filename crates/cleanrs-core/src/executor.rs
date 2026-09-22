@@ -1,5 +1,5 @@
 use crate::{
-    is_protected_path,
+    can_delete_path,
     model::{CleanMethod, CleanResult, CleanTarget},
 };
 use anyhow::{bail, Context, Result};
@@ -9,9 +9,9 @@ use std::{
 };
 
 pub fn clean_target(cleaner_id: &str, target: &CleanTarget, dry_run: bool) -> Result<CleanResult> {
-    if is_protected_path(&target.path) {
+    if !can_delete_path(&target.path) {
         bail!(
-            "refusing to clean protected system path: {}",
+            "refusing to clean protected or unsafe path: {}",
             target.path.display()
         );
     }
@@ -138,6 +138,6 @@ mod tests {
 
         let error = clean_target("test", &target, false).expect_err("path must be rejected");
 
-        assert!(error.to_string().contains("protected system path"));
+        assert!(error.to_string().contains("protected or unsafe path"));
     }
 }

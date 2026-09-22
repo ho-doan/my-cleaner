@@ -230,6 +230,7 @@ impl App {
                     .root_entries
                     .iter()
                     .chain(report.home_entries.iter())
+                    .chain(report.readonly_entries.iter())
                     .cloned()
                     .collect()
             })
@@ -472,7 +473,7 @@ fn run_loop(stdout: &mut Stdout) -> Result<()> {
                                 app.mode = Mode::Confirming;
                             } else {
                                 app.last_action = Some(
-                                    "Only non-protected files or safe suggested folders can be moved to Trash"
+                                    "Only approved files or safe suggested folders can be moved to Trash"
                                         .to_owned(),
                                 );
                             }
@@ -499,7 +500,7 @@ fn run_loop(stdout: &mut Stdout) -> Result<()> {
                             let selected_path = if let Some(scan) = &app.directory_scan {
                                 scan.entries
                                     .get(app.directory_cursor)
-                                    .filter(|entry| entry.is_dir && !entry.read_only)
+                                    .filter(|entry| entry.is_dir)
                                     .map(|entry| entry.path.clone())
                             } else {
                                 app.full_disk_entries()
@@ -932,6 +933,12 @@ fn render_confirmation_modal(frame: &mut Frame, app: &App) {
             "Estimated size: {}",
             format_size(target.size_bytes, DECIMAL)
         )));
+        if cleanrs_core::is_protected_path(&target.path) {
+            lines.push(Line::from(Span::styled(
+                "Protected-area item: verify it is stale and not in use.",
+                Style::default().fg(Color::Yellow),
+            )));
+        }
         lines.push(Line::from(""));
         lines.push(Line::from("This is recoverable from the macOS Trash."));
         lines.push(Line::from("Press [y] to confirm or [n]/[esc] to cancel."));
@@ -1086,6 +1093,11 @@ fn render_sidebar(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
             .iter()
             .map(|entry| entry.size_bytes)
             .sum::<u64>();
+        let protected_total = report
+            .readonly_entries
+            .iter()
+            .map(|entry| entry.size_bytes)
+            .sum::<u64>();
         lines.push(Line::from(format!(
             "Top root: {}",
             format_size(root_total, DECIMAL)
@@ -1093,6 +1105,10 @@ fn render_sidebar(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         lines.push(Line::from(format!(
             "Top HOME: {}",
             format_size(home_total, DECIMAL)
+        )));
+        lines.push(Line::from(format!(
+            "Protected: {}",
+            format_size(protected_total, DECIMAL)
         )));
         lines.push(Line::from(format!(
             "Blocked: {}",
@@ -1177,7 +1193,7 @@ fn render_full_disk(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let mut items = Vec::new();
     let mut selected_index = None;
     items.push(ListItem::new(
-        "Inventory — Enter opens folders; no direct delete",
+        "Inventory — Enter opens folders; x moves only approved items to Trash",
     ));
 
     if app.full_disk_scanning {
@@ -1185,72 +1201,70 @@ fn render_full_disk(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     } else if let Some(error) = &app.full_disk_error {
         items.push(ListItem::new(format!("Scan error: {error}")));
     } else if let Some(report) = &app.full_disk {
-        let root_start = 2;
+        let render_entry = |entry: &cleanrs_core::DiskScanEntry| {
+            let (marker, color) = if entry.read_only {
+                ("READONLY", Color::Red)
+            } else {
+                ("REVIEW", Color::Yellow)
+            };
+            ListItem::new(Line::from(vec![
+                Span::styled(
+                    format!("{}  ", format_size(entry.size_bytes, DECIMAL)),
+                    Style::default().fg(Color::Gray),
+                ),
+                Span::styled(format!("[{marker}]"), Style::default().fg(color)),
+                Span::raw(format!("  {}", entry.path.display())),
+            ]))
+        };
         items.push(ListItem::new(Span::styled(
             "Largest root entries",
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         )));
-        items.extend(report.root_entries.iter().map(|entry| {
-            let (marker, color) = if entry.read_only {
-                ("READONLY", Color::Red)
-            } else {
-                ("REVIEW", Color::Yellow)
-            };
-            ListItem::new(Line::from(vec![
-                Span::styled(
-                    format!("{}  ", format_size(entry.size_bytes, DECIMAL)),
-                    Style::default().fg(Color::Gray),
-                ),
-                Span::styled(format!("[{marker}]"), Style::default().fg(color)),
-                Span::raw(format!("  {}", entry.path.display())),
-            ]))
-        }));
+        let root_start = items.len();
+        items.extend(report.root_entries.iter().map(&render_entry));
         items.push(ListItem::new(""));
-        let home_start = root_start + report.root_entries.len() + 2;
         items.push(ListItem::new(Span::styled(
             "Largest HOME entries",
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         )));
-        items.extend(report.home_entries.iter().map(|entry| {
-            let (marker, color) = if entry.read_only {
-                ("READONLY", Color::Red)
-            } else {
-                ("REVIEW", Color::Yellow)
-            };
-            ListItem::new(Line::from(vec![
-                Span::styled(
-                    format!("{}  ", format_size(entry.size_bytes, DECIMAL)),
-                    Style::default().fg(Color::Gray),
-                ),
-                Span::styled(format!("[{marker}]"), Style::default().fg(color)),
-                Span::raw(format!("  {}", entry.path.display())),
-            ]))
-        }));
-        if !report.root_entries.is_empty() || !report.home_entries.is_empty() {
-            selected_index = if app.full_disk_cursor < report.root_entries.len() {
-                Some(root_start + app.full_disk_cursor)
-            } else {
-                Some(home_start + app.full_disk_cursor - report.root_entries.len())
-            };
-        }
+        let home_start = items.len();
+        items.extend(report.home_entries.iter().map(&render_entry));
+        items.push(ListItem::new(""));
         items.push(ListItem::new(Span::styled(
-            "Protected system/mount paths",
+            "Protected system/mount paths — size only; Enter to inspect",
             Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         )));
-        items.extend(report.readonly_paths.iter().map(|path| {
-            ListItem::new(Span::styled(
-                format!("[READONLY] {}", path.display()),
-                Style::default().fg(Color::Red),
-            ))
-        }));
+        let readonly_start = items.len();
+        items.extend(report.readonly_entries.iter().map(&render_entry));
+        let root_len = report.root_entries.len();
+        let home_len = report.home_entries.len();
+        let readonly_len = report.readonly_entries.len();
+        if app.full_disk_cursor < root_len {
+            selected_index = Some(root_start + app.full_disk_cursor);
+        } else if app.full_disk_cursor < root_len + home_len {
+            selected_index = Some(home_start + app.full_disk_cursor - root_len);
+        } else if app.full_disk_cursor < root_len + home_len + readonly_len {
+            selected_index = Some(readonly_start + app.full_disk_cursor - root_len - home_len);
+        }
         items.push(ListItem::new(Line::from(vec![
             Span::styled("Protected  ", Style::default().fg(Color::Gray)),
             Span::styled(
-                report.readonly_paths.len().to_string(),
+                format!(
+                    "{}  ·  {}",
+                    report.readonly_entries.len(),
+                    format_size(
+                        report
+                            .readonly_entries
+                            .iter()
+                            .map(|entry| entry.size_bytes)
+                            .sum::<u64>(),
+                        DECIMAL
+                    )
+                ),
                 Style::default().fg(Color::Red),
             ),
             Span::styled("  ·  Inaccessible  ", Style::default().fg(Color::Gray)),

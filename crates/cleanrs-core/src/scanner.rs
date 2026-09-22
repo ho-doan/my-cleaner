@@ -22,6 +22,8 @@ pub struct FullDiskScan {
     pub root: PathBuf,
     pub root_entries: Vec<DiskScanEntry>,
     pub home_entries: Vec<DiskScanEntry>,
+    /// Protected system/mount roots with recursively calculated sizes.
+    pub readonly_entries: Vec<DiskScanEntry>,
     /// System and mount paths intentionally not traversed by the inventory.
     /// They are surfaced as read-only instead of becoming delete targets.
     pub readonly_paths: Vec<PathBuf>,
@@ -96,8 +98,10 @@ pub fn full_disk_scan(root: &Path, limit: usize) -> Result<FullDiskScan> {
     let readonly_paths = excluded_root_paths(root);
     let (mut root_entries, root_inaccessible) =
         scan_children(root, &readonly_paths).with_context(|| format!("scan {}", root.display()))?;
+    let (mut readonly_entries, readonly_inaccessible) = scan_readonly_paths(&readonly_paths);
     root_entries.sort_by_key(|entry| std::cmp::Reverse(entry.size_bytes));
     root_entries.truncate(limit);
+    readonly_entries.sort_by_key(|entry| entry.path.clone());
 
     let (mut home_entries, home_inaccessible) = match std::env::var_os("HOME") {
         Some(home) => scan_children(Path::new(&home), &[])?,
@@ -110,8 +114,9 @@ pub fn full_disk_scan(root: &Path, limit: usize) -> Result<FullDiskScan> {
         root: root.to_path_buf(),
         root_entries,
         home_entries,
+        readonly_entries,
         readonly_paths,
-        inaccessible_paths: root_inaccessible + home_inaccessible,
+        inaccessible_paths: root_inaccessible + home_inaccessible + readonly_inaccessible,
     })
 }
 
@@ -127,6 +132,20 @@ pub fn is_protected_path(path: &Path) -> bool {
     .into_iter()
     .map(Path::new)
     .any(|protected| path == protected || path.starts_with(protected))
+}
+
+/// Returns whether an explorer-selected path is safe enough for an explicit
+/// move to Trash. Protected trees only allow individually selected transient
+/// files with a specific suggestion; protected directories remain blocked.
+pub fn can_delete_path(path: &Path) -> bool {
+    if !is_protected_path(path) {
+        return true;
+    }
+
+    let is_file = std::fs::symlink_metadata(path)
+        .map(|metadata| metadata.file_type().is_file())
+        .unwrap_or(false);
+    is_file && file_suggestion(path).is_some_and(|suggestion| suggestion.can_delete)
 }
 
 /// Scan one directory level for an interactive, read-only explorer.
@@ -176,17 +195,18 @@ pub fn scan_directory(path: &Path, limit: usize) -> Result<DirectoryScan> {
             } else {
                 (0, 0)
             };
-            let read_only =
-                is_protected_path(&child) || child.file_name().is_some_and(|name| name == ".git");
-            let suggestion = (!read_only)
-                .then(|| {
-                    if is_dir {
-                        directory_suggestion(&child)
-                    } else {
-                        file_suggestion(&child)
-                    }
-                })
-                .flatten();
+            let suggestion = if is_dir {
+                directory_suggestion(&child)
+            } else {
+                file_suggestion(&child)
+            };
+            let protected_file_is_deletable = !is_dir
+                && is_protected_path(&child)
+                && suggestion
+                    .as_ref()
+                    .is_some_and(|suggestion| suggestion.can_delete);
+            let read_only = child.file_name().is_some_and(|name| name == ".git")
+                || (is_protected_path(&child) && !protected_file_is_deletable);
             (
                 Some(DirectoryScanEntry {
                     path: child,
@@ -274,6 +294,20 @@ fn directory_suggestion(path: &Path) -> Option<DirectorySuggestion> {
 
 fn file_suggestion(path: &Path) -> Option<DirectorySuggestion> {
     let name = path.file_name()?.to_string_lossy();
+    if path.starts_with(Path::new("/cores")) && (name == "core" || name.starts_with("core.")) {
+        return Some(DirectorySuggestion {
+            reason: "crash dump; keep only if it is still needed for debugging".to_owned(),
+            can_delete: true,
+        });
+    }
+    if path.starts_with(Path::new("/private/tmp"))
+        || path.starts_with(Path::new("/private/var/tmp"))
+    {
+        return Some(DirectorySuggestion {
+            reason: "system temporary file; verify it is stale and not in use".to_owned(),
+            can_delete: true,
+        });
+    }
     let reason = match name.as_ref() {
         ".claude.json" | ".claude.json.backup" => {
             "Claude config; verify the CLI/app is no longer used"
@@ -324,6 +358,26 @@ fn scan_children(parent: &Path, excluded: &[PathBuf]) -> Result<(Vec<DiskScanEnt
     Ok((entries, inaccessible))
 }
 
+fn scan_readonly_paths(paths: &[PathBuf]) -> (Vec<DiskScanEntry>, usize) {
+    let results = paths
+        .par_iter()
+        .map(|path| {
+            let (size_bytes, inaccessible) = tolerant_dir_size(path);
+            (
+                DiskScanEntry {
+                    path: path.clone(),
+                    size_bytes,
+                    read_only: true,
+                },
+                inaccessible,
+            )
+        })
+        .collect::<Vec<_>>();
+    let inaccessible = results.iter().map(|(_, count)| count).sum();
+    let entries = results.into_iter().map(|(entry, _)| entry).collect();
+    (entries, inaccessible)
+}
+
 fn tolerant_dir_size(path: &Path) -> (u64, usize) {
     if let Ok(metadata) = std::fs::symlink_metadata(path) {
         if metadata.file_type().is_file() {
@@ -354,8 +408,11 @@ fn tolerant_dir_size(path: &Path) -> (u64, usize) {
 
 #[cfg(test)]
 mod tests {
-    use super::{dir_size, is_protected_path, scan_directory};
+    use super::{
+        dir_size, file_suggestion, is_protected_path, scan_directory, scan_readonly_paths,
+    };
     use std::fs;
+    use std::path::Path;
     use tempfile::tempdir;
 
     #[test]
@@ -445,5 +502,31 @@ mod tests {
             .suggestion
             .as_ref()
             .is_some_and(|suggestion| !suggestion.can_delete));
+    }
+
+    #[test]
+    fn protected_inventory_keeps_size_without_authorizing_root_deletion() {
+        let root = tempdir().expect("temporary directory");
+        fs::write(root.path().join("large.cache"), vec![0_u8; 32])
+            .expect("write protected fixture");
+
+        let (entries, inaccessible) = scan_readonly_paths(&[root.path().to_path_buf()]);
+
+        assert_eq!(inaccessible, 0);
+        assert_eq!(entries[0].size_bytes, 32);
+        assert!(entries[0].read_only);
+    }
+
+    #[test]
+    fn protected_transient_files_get_explicit_review_suggestions() {
+        let core_dump =
+            file_suggestion(Path::new("/cores/core.123")).expect("core dump should be recognized");
+        assert!(core_dump.can_delete);
+
+        let temp_file = file_suggestion(Path::new("/private/tmp/my-cleaner.tmp"))
+            .expect("system temp file should be recognized");
+        assert!(temp_file.can_delete);
+
+        assert!(file_suggestion(Path::new("/private/var/db/system.db")).is_none());
     }
 }

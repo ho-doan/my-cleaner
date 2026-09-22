@@ -259,7 +259,7 @@ fn print_full_disk_table(report: &FullDiskScan) {
     println!("Full-disk inventory (read-only; no delete targets generated)");
     println!(
         "Read-only mount/system paths: {}",
-        report.readonly_paths.len()
+        report.readonly_entries.len()
     );
     println!("Inaccessible paths: {}", report.inaccessible_paths);
 
@@ -285,15 +285,16 @@ fn print_full_disk_table(report: &FullDiskScan) {
         println!("{table}");
     }
 
-    if !report.readonly_paths.is_empty() {
+    if !report.readonly_entries.is_empty() {
         let mut table = Table::new();
         table.load_preset(UTF8_FULL);
-        table.set_header(["State", "Reason", "Path"]);
-        for path in &report.readonly_paths {
+        table.set_header(["State", "Reason", "Size", "Path"]);
+        for entry in &report.readonly_entries {
             table.add_row([
                 "READONLY".to_owned(),
                 "system/mount excluded".to_owned(),
-                path.display().to_string(),
+                format_size(entry.size_bytes, DECIMAL),
+                entry.path.display().to_string(),
             ]);
         }
         println!("{table}");
