@@ -31,6 +31,9 @@ pub struct FullDiskScan {
 #[derive(Clone, Debug, Serialize)]
 pub struct DirectorySuggestion {
     pub reason: String,
+    /// Whether the explorer may move this whole directory to Trash after an
+    /// explicit confirmation. Sensitive data remains suggestion-only.
+    pub can_delete: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -242,26 +245,30 @@ fn git_context(path: &Path) -> (bool, bool) {
 
 fn directory_suggestion(path: &Path) -> Option<DirectorySuggestion> {
     let name = path.file_name()?.to_string_lossy();
-    let reason = match name.as_ref() {
-        "node_modules" => "regenerable Node dependencies",
-        "target" => "Rust build artifacts",
-        ".dart_tool" => "Dart/Flutter tool cache",
-        "build" => "generated build output",
-        "coverage" => "generated test coverage",
-        ".next" => "Next.js build output",
-        ".nuxt" => "Nuxt build output",
-        ".turbo" => "Turborepo cache",
-        ".gradle" => "Gradle project cache",
-        "Pods" => "CocoaPods dependencies",
-        ".venv" => "Python virtual environment",
-        "__pycache__" => "Python bytecode cache",
-        ".pytest_cache" => "pytest cache",
-        "DerivedData" => "Xcode build intermediates",
-        "CoreSimulator" => "iOS Simulator data; review devices and runtimes before deleting",
+    let (reason, can_delete) = match name.as_ref() {
+        "node_modules" => ("regenerable Node dependencies", true),
+        "target" => ("Rust build artifacts", true),
+        ".dart_tool" => ("Dart/Flutter tool cache", true),
+        "build" => ("generated build output", true),
+        "coverage" => ("generated test coverage", true),
+        ".next" => ("Next.js build output", true),
+        ".nuxt" => ("Nuxt build output", true),
+        ".turbo" => ("Turborepo cache", true),
+        ".gradle" => ("Gradle project cache", true),
+        "Pods" => ("CocoaPods dependencies", true),
+        ".venv" => ("Python virtual environment", true),
+        "__pycache__" => ("Python bytecode cache", true),
+        ".pytest_cache" => ("pytest cache", true),
+        "DerivedData" => ("Xcode build intermediates", true),
+        "CoreSimulator" => (
+            "iOS Simulator data; review devices and runtimes before deleting",
+            false,
+        ),
         _ => return None,
     };
     Some(DirectorySuggestion {
         reason: reason.to_owned(),
+        can_delete,
     })
 }
 
@@ -275,6 +282,7 @@ fn file_suggestion(path: &Path) -> Option<DirectorySuggestion> {
     };
     Some(DirectorySuggestion {
         reason: reason.to_owned(),
+        can_delete: false,
     })
 }
 
@@ -391,6 +399,10 @@ mod tests {
                 .map(|suggestion| suggestion.reason.as_str()),
             Some("regenerable Node dependencies")
         );
+        assert!(entry
+            .suggestion
+            .as_ref()
+            .is_some_and(|suggestion| suggestion.can_delete));
         assert!(!report.is_git_repo);
     }
 
@@ -424,8 +436,14 @@ mod tests {
             .expect("Claude config entry");
 
         assert!(!simulator_entry.read_only);
-        assert!(simulator_entry.suggestion.is_some());
+        assert!(simulator_entry
+            .suggestion
+            .as_ref()
+            .is_some_and(|suggestion| !suggestion.can_delete));
         assert!(!claude_entry.read_only);
-        assert!(claude_entry.suggestion.is_some());
+        assert!(claude_entry
+            .suggestion
+            .as_ref()
+            .is_some_and(|suggestion| !suggestion.can_delete));
     }
 }

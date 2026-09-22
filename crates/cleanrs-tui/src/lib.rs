@@ -1,7 +1,7 @@
 use anyhow::Result;
 use cleanrs_core::{
-    all_cleaners, full_disk_scan, scan_cleaner, scan_directory, Category, CleanResult, CleanTarget,
-    CleanerScan, DirectoryScan, DirectoryScanEntry, FullDiskScan, RiskLevel,
+    all_cleaners, full_disk_scan, scan_cleaner, scan_directory, Category, CleanMethod, CleanResult,
+    CleanTarget, CleanerScan, DirectoryScan, DirectoryScanEntry, FullDiskScan, RiskLevel,
 };
 use crossterm::{
     event::{self, Event, KeyCode, KeyEvent, KeyEventKind},
@@ -95,6 +95,9 @@ struct App {
     directory_error: Option<String>,
     directory_history: Vec<std::path::PathBuf>,
     directory_cursor: usize,
+    pending_explorer_delete: Option<CleanTarget>,
+    explorer_delete_receiver: Option<Receiver<Result<CleanResult, String>>>,
+    explorer_deleting: bool,
     clean_receiver: Option<Receiver<CleanMessage>>,
     cleaning_completed: usize,
     cleaning_total: usize,
@@ -125,6 +128,9 @@ impl App {
             directory_error: None,
             directory_history: Vec::new(),
             directory_cursor: 0,
+            pending_explorer_delete: None,
+            explorer_delete_receiver: None,
+            explorer_deleting: false,
             clean_receiver: None,
             cleaning_completed: 0,
             cleaning_total: 0,
@@ -147,6 +153,9 @@ impl App {
         self.directory_error = None;
         self.directory_history.clear();
         self.directory_cursor = 0;
+        self.pending_explorer_delete = None;
+        self.explorer_delete_receiver = None;
+        self.explorer_deleting = false;
         self.clean_receiver = None;
         self.cleaning_completed = 0;
         self.cleaning_total = 0;
@@ -266,6 +275,7 @@ fn read_disk_usage() -> Option<DiskUsage> {
 enum KeyAction {
     BackDirectory,
     Continue,
+    DeleteFile,
     FullDisk,
     OpenDirectory,
     Quit,
@@ -322,6 +332,54 @@ fn queue_directory_scan(
     *receiver = Some(start_directory_scan(path));
 }
 
+fn selected_explorer_target(app: &App) -> Option<CleanTarget> {
+    let scan = app.directory_scan.as_ref()?;
+    let entry = scan.entries.get(app.directory_cursor)?;
+    if entry.read_only {
+        return None;
+    }
+    if entry.is_dir
+        && !entry
+            .suggestion
+            .as_ref()
+            .is_some_and(|suggestion| suggestion.can_delete)
+    {
+        return None;
+    }
+
+    Some(CleanTarget {
+        path: entry.path.clone(),
+        size_bytes: entry.size_bytes,
+        description: if entry.is_dir {
+            "Safe suggested folder selected from the directory explorer"
+        } else {
+            "File selected from the directory explorer"
+        }
+        .to_owned(),
+        method: CleanMethod::TrashPath,
+    })
+}
+
+fn start_explorer_delete(app: &mut App) {
+    let Some(target) = app.pending_explorer_delete.take() else {
+        app.mode = Mode::Reviewing;
+        return;
+    };
+    let (sender, receiver) = mpsc::channel();
+    app.mode = Mode::Cleaning;
+    app.explorer_deleting = true;
+    app.cleaning_completed = 0;
+    app.cleaning_total = 1;
+    app.cleaning_disk_before = app.disk.or_else(read_disk_usage);
+    app.explorer_delete_receiver = Some(receiver);
+
+    thread::spawn(move || {
+        let result = cleanrs_core::executor::clean_target("explorer", &target, false)
+            .map_err(|error| format!("{}: {error:#}", target.path.display()));
+        let _ = sender.send(result);
+    });
+}
+
 fn start_cleaning(app: &mut App) {
     let jobs = app
         .rows
@@ -371,6 +429,7 @@ fn run_loop(stdout: &mut Stdout) -> Result<()> {
         receive_scans(&mut app, &receiver);
         receive_full_disk_scan(&mut app, &mut full_disk_receiver);
         receive_directory_scan(&mut app, &mut directory_receiver);
+        receive_explorer_delete(&mut app, &mut directory_receiver);
         if receive_cleaning(&mut app) {
             let (expected, next_receiver) = start_scan();
             app.reset_for_scan(expected);
@@ -406,6 +465,18 @@ fn run_loop(stdout: &mut Stdout) -> Result<()> {
                             }
                         }
                         KeyAction::Quit => break Ok(()),
+                        KeyAction::DeleteFile => {
+                            if let Some(target) = selected_explorer_target(&app) {
+                                app.pending_explorer_delete = Some(target);
+                                app.confirm_text.clear();
+                                app.mode = Mode::Confirming;
+                            } else {
+                                app.last_action = Some(
+                                    "Only non-protected files or safe suggested folders can be moved to Trash"
+                                        .to_owned(),
+                                );
+                            }
+                        }
                         KeyAction::FullDisk => {
                             if !app.full_disk_scanning {
                                 app.full_disk_scanning = true;
@@ -534,6 +605,47 @@ fn receive_directory_scan(
     }
 }
 
+fn receive_explorer_delete(
+    app: &mut App,
+    directory_receiver: &mut Option<Receiver<Result<DirectoryScan, String>>>,
+) {
+    let Some(receiver) = app.explorer_delete_receiver.take() else {
+        return;
+    };
+
+    match receiver.try_recv() {
+        Ok(outcome) => {
+            app.explorer_deleting = false;
+            app.cleaning_completed = 1;
+            let disk_after = read_disk_usage().or(app.cleaning_disk_before);
+            app.disk = disk_after;
+            match outcome {
+                Ok(result) => {
+                    app.results.push(result);
+                    app.last_action = Some("Item moved to Trash; folder is rescanning".to_owned());
+                }
+                Err(error) => {
+                    app.errors.push(error.clone());
+                    app.last_action = Some(format!("Item was not moved to Trash: {error}"));
+                }
+            }
+            app.cleaning_disk_before = None;
+            app.mode = Mode::Reviewing;
+            if let Some(path) = app.directory_scan.as_ref().map(|scan| scan.path.clone()) {
+                queue_directory_scan(app, directory_receiver, path);
+            }
+        }
+        Err(TryRecvError::Empty) => {
+            app.explorer_delete_receiver = Some(receiver);
+        }
+        Err(TryRecvError::Disconnected) => {
+            app.explorer_deleting = false;
+            app.mode = Mode::Reviewing;
+            app.last_action = Some("File delete worker stopped unexpectedly".to_owned());
+        }
+    }
+}
+
 fn receive_cleaning(app: &mut App) -> bool {
     let Some(receiver) = app.clean_receiver.take() else {
         return false;
@@ -626,6 +738,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> KeyAction {
                         KeyCode::Down | KeyCode::Char('j') => app.move_directory_cursor(1),
                         KeyCode::Up | KeyCode::Char('k') => app.move_directory_cursor(-1),
                         KeyCode::Enter => return KeyAction::OpenDirectory,
+                        KeyCode::Char('x') => return KeyAction::DeleteFile,
                         KeyCode::Char('b') => return KeyAction::BackDirectory,
                         KeyCode::Char('f') => return KeyAction::FullDisk,
                         _ => {}
@@ -655,6 +768,19 @@ fn handle_key(app: &mut App, key: KeyEvent) -> KeyAction {
 }
 
 fn handle_confirmation(app: &mut App, key: KeyEvent) {
+    if app.pending_explorer_delete.is_some() {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('n') => {
+                app.pending_explorer_delete = None;
+                app.confirm_text.clear();
+                app.mode = Mode::Reviewing;
+            }
+            KeyCode::Char('y') => start_explorer_delete(app),
+            _ => {}
+        }
+        return;
+    }
+
     let manual = app.has_manual_selection();
     match key.code {
         KeyCode::Esc | KeyCode::Char('n') => {
@@ -688,6 +814,7 @@ fn render(frame: &mut Frame, app: &App) {
         ),
         Mode::Reviewing => " cleanrs — review targets ".to_owned(),
         Mode::Confirming => " cleanrs — confirm ".to_owned(),
+        Mode::Cleaning if app.explorer_deleting => " cleanrs — moving item to Trash ".to_owned(),
         Mode::Cleaning => format!(
             " cleanrs — cleaning {}/{} targets ",
             app.cleaning_completed, app.cleaning_total
@@ -930,7 +1057,11 @@ fn render_directory(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         .unwrap_or_else(|| "loading…".to_owned());
     items.push(ListItem::new(format!("Path: {path}")));
 
-    if app.directory_scanning {
+    if app.explorer_deleting {
+        items.push(ListItem::new(
+            "Moving the selected item to Trash in background…",
+        ));
+    } else if app.directory_scanning {
         items.push(ListItem::new(
             "Git/status and children are scanning in background…",
         ));
@@ -946,7 +1077,7 @@ fn render_directory(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         };
         items.push(ListItem::new(git_status));
         items.push(ListItem::new(
-            "Entries — Enter opens folders; suggestions require approved cleanup rules",
+            "Entries — Enter opens folders; [x] moves a file/safe suggested folder to Trash",
         ));
         let entry_start = items.len();
         if report.entries.is_empty() {
@@ -955,8 +1086,14 @@ fn render_directory(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
             items.extend(report.entries.iter().map(|entry| {
                 let marker = if entry.read_only {
                     "READONLY"
-                } else if entry.suggestion.is_some() {
+                } else if entry
+                    .suggestion
+                    .as_ref()
+                    .is_some_and(|suggestion| suggestion.can_delete)
+                {
                     "SUGGEST"
+                } else if entry.suggestion.is_some() {
+                    "REVIEW"
                 } else if entry.is_dir {
                     "DIR"
                 } else {
@@ -1037,11 +1174,14 @@ fn footer_text(app: &App) -> String {
         Mode::Scanning => "Scanning in background…  [q] quit".to_owned(),
         Mode::Reviewing => {
             if app.show_full_disk {
+                if app.explorer_deleting {
+                    return "Moving item to Trash in background… [q] quit".to_owned();
+                }
                 if app.directory_scanning {
                     return "Scanning folder in background… [b] back  [q] quit".to_owned();
                 }
                 if app.directory_scan.is_some() {
-                    return "Directory explorer: [↑/↓] move  [enter] open  [b] back  [f] root scan  [q] quit"
+                    return "Directory explorer: [↑/↓] move  [enter] open  [x] Trash item  [b] back  [f] root scan  [q] quit"
                         .to_owned();
                 }
                 return "Full-disk inventory: [↑/↓] choose  [enter] open  [b] back to targets  [f] rescan  [q] quit"
@@ -1053,20 +1193,37 @@ fn footer_text(app: &App) -> String {
 [↑/↓] move  [space] toggle  [a] select Safe  [d] dry-run  [r] reload  [f] full disk  [enter] continue  [q] quit"
             )
         }
-        Mode::Confirming if app.has_manual_selection() && !app.dry_run => format!(
-            "Docker/manual selected. Type FORCE then [enter] to execute, [n] cancel. Current: {}",
-            app.confirm_text
-        ),
-        Mode::Confirming => format!(
-            "{} {} selected target(s)? [y] {}  [n] cancel",
-            if app.dry_run { "Preview" } else { "Execute" },
-            app.selected_count(),
-            if app.dry_run {
-                "preview only; no files changed"
+        Mode::Confirming => {
+            if let Some(target) = &app.pending_explorer_delete {
+                let item_kind = if target.path.is_dir() {
+                    "folder and all contents"
+                } else {
+                    "file"
+                };
+                format!(
+                    "Move {} {} ({}) to Trash? [y] confirm  [n] cancel  [esc] cancel",
+                    item_kind,
+                    target.path.display(),
+                    format_size(target.size_bytes, DECIMAL)
+                )
+            } else if app.has_manual_selection() && !app.dry_run {
+                format!(
+                    "Docker/manual selected. Type FORCE then [enter] to execute, [n] cancel. Current: {}",
+                    app.confirm_text
+                )
             } else {
-                "yes"
+                format!(
+                    "{} {} selected target(s)? [y] {}  [n] cancel",
+                    if app.dry_run { "Preview" } else { "Execute" },
+                    app.selected_count(),
+                    if app.dry_run {
+                        "preview only; no files changed"
+                    } else {
+                        "yes"
+                    }
+                )
             }
-        ),
+        }
         Mode::Cleaning => format!(
             "Cleaning {}/{} target(s) in background… [q] quit",
             app.cleaning_completed, app.cleaning_total

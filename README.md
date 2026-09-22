@@ -43,8 +43,11 @@ Press f for an inventory of the largest root-disk and HOME directories; b
 returns to cleanup targets. From the inventory, press Enter on a folder to scan
 its children in the background; use Enter again to drill down and b to go back.
 Git repositories show clean/dirty status, and regenerable directories such as
-`node_modules`, `target`, `.dart_tool`, `CoreSimulator`, and build caches are
-marked as `SUGGEST` only. User-owned inventory rows are `REVIEW`: they can be
-inspected but are never direct delete targets. Protected system/mount paths are
-the only `READONLY` rows. Full-disk inventory never creates delete targets;
-cleanup still requires an approved cleaner rule and confirmation.
+`node_modules`, `target`, `.dart_tool`, and build caches are marked as
+`SUGGEST`. `CoreSimulator` and app/config data remain `REVIEW`: they can be
+inspected but are not whole-folder delete targets. Protected system/mount paths
+are the only `READONLY` rows. Full-disk inventory never creates delete targets;
+cleanup still requires an approved cleaner rule and confirmation. Inside a
+directory, select a non-protected file or a safe `SUGGEST` folder and press x
+to move the item to Trash after confirmation. Protected paths and sensitive
+folders such as `CoreSimulator` remain review-only.
