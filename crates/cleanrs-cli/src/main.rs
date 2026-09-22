@@ -1,9 +1,12 @@
 use anyhow::{bail, Result};
 use clap::{Args, Parser, Subcommand};
-use cleanrs_core::{all_cleaners, scan_all, CleanResult, Cleaner, CleanerScan};
+use cleanrs_core::{
+    all_cleaners, full_disk_scan, scan_all, CleanResult, Cleaner, CleanerScan, FullDiskScan,
+};
 use comfy_table::{presets::UTF8_FULL, Table};
 use humansize::{format_size, DECIMAL};
 use serde::Serialize;
+use std::path::Path;
 
 #[derive(Debug, Parser)]
 #[command(name = "cleanrs", version, about = "Safe, rule-based disk cleanup")]
@@ -29,6 +32,13 @@ struct ScanArgs {
     /// Comma-separated cleaner IDs, for example: npm,brew.
     #[arg(long, value_delimiter = ',')]
     only: Option<Vec<String>>,
+    /// Inventory the largest top-level directories on the root disk and HOME.
+    /// This is read-only and does not create delete targets.
+    #[arg(long)]
+    full_disk: bool,
+    /// Number of largest entries to show per scanned location.
+    #[arg(long, default_value_t = 12)]
+    top: usize,
     /// Emit machine-readable JSON.
     #[arg(long)]
     json: bool,
@@ -71,6 +81,23 @@ fn main() -> Result<()> {
 }
 
 fn scan_command(args: ScanArgs) -> Result<()> {
+    if args.top == 0 {
+        bail!("--top must be greater than zero");
+    }
+
+    if args.full_disk {
+        if args.only.is_some() {
+            bail!("--full-disk cannot be combined with --only");
+        }
+        let report = full_disk_scan(Path::new("/"), args.top)?;
+        if args.json {
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        } else {
+            print_full_disk_table(&report);
+        }
+        return Ok(());
+    }
+
     if let Some(ids) = args.only.as_deref() {
         selected_cleaners(Some(ids))?;
     }
@@ -226,6 +253,36 @@ fn print_scan_table(reports: &[CleanerScan]) {
     }
 
     println!("{table}");
+}
+
+fn print_full_disk_table(report: &FullDiskScan) {
+    println!("Full-disk inventory (read-only; no delete targets generated)");
+    println!(
+        "Excluded mount/system paths: {}",
+        report.excluded_paths.len()
+    );
+    println!("Inaccessible paths: {}", report.inaccessible_paths);
+
+    for (label, entries) in [
+        ("Root disk", &report.root_entries),
+        ("HOME", &report.home_entries),
+    ] {
+        let mut table = Table::new();
+        table.load_preset(UTF8_FULL);
+        table.set_header([label, "Size", "Path"]);
+        if entries.is_empty() {
+            table.add_row(["-", "0 B", "No readable entries"]);
+        } else {
+            for entry in entries {
+                table.add_row([
+                    label.to_owned(),
+                    format_size(entry.size_bytes, DECIMAL),
+                    entry.path.display().to_string(),
+                ]);
+            }
+        }
+        println!("{table}");
+    }
 }
 
 fn print_clean_output(output: &CleanOutput) {

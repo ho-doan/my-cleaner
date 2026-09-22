@@ -17,6 +17,11 @@ pub mod uv;
 pub mod xcode;
 pub mod yarn;
 
+#[cfg(test)]
+mod tests;
+
+use crate::model::{CleanMethod, CleanTarget};
+use crate::scanner::dir_size;
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 use std::process::Command;
@@ -55,4 +60,28 @@ pub fn command_output(program: &str, args: &[&str]) -> Result<String> {
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+/// Build a target only when it still contains reclaimable data.
+///
+/// Package-manager cleanup commands commonly leave their cache directory in
+/// place but empty. Omitting zero-byte targets keeps a post-clean rescan honest.
+pub fn non_empty_target(
+    path: PathBuf,
+    description: impl Into<String>,
+    method: CleanMethod,
+) -> Result<Option<CleanTarget>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let size_bytes = dir_size(&path)?;
+    if size_bytes == 0 {
+        return Ok(None);
+    }
+    Ok(Some(CleanTarget {
+        path,
+        size_bytes,
+        description: description.into(),
+        method,
+    }))
 }

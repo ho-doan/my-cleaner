@@ -1,6 +1,5 @@
-use super::{command_available, home_path};
+use super::{command_available, home_path, non_empty_target};
 use crate::model::{Category, CleanMethod, CleanTarget, RiskLevel};
-use crate::scanner::dir_size;
 use crate::Cleaner;
 use anyhow::Result;
 
@@ -31,15 +30,15 @@ impl Cleaner for GradleCleaner {
         let Some(path) = home_path(".gradle/caches") else {
             return Ok(Vec::new());
         };
-        if !path.is_dir() {
-            return Ok(Vec::new());
-        }
-
-        Ok(vec![CleanTarget {
-            size_bytes: dir_size(&path)?,
+        let Some(target) = non_empty_target(
             path,
-            description: "Gradle dependency and build cache".to_owned(),
-            method: CleanMethod::TrashPath,
-        }])
+            "Gradle dependency and build cache",
+            CleanMethod::TrashPath,
+        )?
+        else {
+            return Ok(Vec::new());
+        };
+
+        Ok(vec![target])
     }
 }

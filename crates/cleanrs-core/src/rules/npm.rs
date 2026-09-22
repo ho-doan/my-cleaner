@@ -1,6 +1,5 @@
-use super::{command_available, command_output, home_path};
+use super::{command_available, command_output, home_path, non_empty_target};
 use crate::model::{Category, CleanMethod, CleanTarget, RiskLevel};
-use crate::scanner::dir_size;
 use crate::Cleaner;
 use anyhow::Result;
 use std::path::PathBuf;
@@ -44,20 +43,20 @@ impl Cleaner for NpmCleaner {
 
     fn scan(&self) -> Result<Vec<CleanTarget>> {
         let path = Self::cache_path()?;
-        if !path.is_dir() {
-            return Ok(Vec::new());
-        }
-
-        Ok(vec![CleanTarget {
-            size_bytes: dir_size(&path)?,
+        let Some(target) = non_empty_target(
             path,
-            description: "npm global cache".to_owned(),
-            method: CleanMethod::RunCommand(vec![
+            "npm global cache",
+            CleanMethod::RunCommand(vec![
                 "npm".to_owned(),
                 "cache".to_owned(),
                 "clean".to_owned(),
                 "--force".to_owned(),
             ]),
-        }])
+        )?
+        else {
+            return Ok(Vec::new());
+        };
+
+        Ok(vec![target])
     }
 }

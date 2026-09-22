@@ -1,6 +1,5 @@
-use super::{command_available, home_path};
+use super::{command_available, home_path, non_empty_target};
 use crate::model::{Category, CleanMethod, CleanTarget, RiskLevel};
-use crate::scanner::dir_size;
 use crate::Cleaner;
 use anyhow::Result;
 use std::path::PathBuf;
@@ -73,18 +72,18 @@ impl Cleaner for PipCleaner {
                 .find(|candidate| candidate.is_dir())
                 .ok_or_else(|| anyhow::anyhow!("pip cache directory was not found"))
         })?;
-        if !path.is_dir() {
-            return Ok(Vec::new());
-        }
-
         let mut clean_command = command;
         clean_command.extend(["cache".to_owned(), "purge".to_owned()]);
 
-        Ok(vec![CleanTarget {
-            size_bytes: dir_size(&path)?,
+        let Some(target) = non_empty_target(
             path,
-            description: "pip download and wheel cache".to_owned(),
-            method: CleanMethod::RunCommand(clean_command),
-        }])
+            "pip download and wheel cache",
+            CleanMethod::RunCommand(clean_command),
+        )?
+        else {
+            return Ok(Vec::new());
+        };
+
+        Ok(vec![target])
     }
 }

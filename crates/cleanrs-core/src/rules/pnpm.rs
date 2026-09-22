@@ -1,6 +1,5 @@
-use super::{command_available, command_output};
+use super::{command_available, command_output, non_empty_target};
 use crate::model::{Category, CleanMethod, CleanTarget, RiskLevel};
-use crate::scanner::dir_size;
 use crate::Cleaner;
 use anyhow::Result;
 use std::path::PathBuf;
@@ -34,19 +33,19 @@ impl Cleaner for PnpmCleaner {
             return Ok(Vec::new());
         }
         let path = PathBuf::from(store);
-        if !path.is_dir() {
-            return Ok(Vec::new());
-        }
-
-        Ok(vec![CleanTarget {
-            size_bytes: dir_size(&path)?,
+        let Some(target) = non_empty_target(
             path,
-            description: "pnpm content-addressable store".to_owned(),
-            method: CleanMethod::RunCommand(vec![
+            "pnpm content-addressable store",
+            CleanMethod::RunCommand(vec![
                 "pnpm".to_owned(),
                 "store".to_owned(),
                 "prune".to_owned(),
             ]),
-        }])
+        )?
+        else {
+            return Ok(Vec::new());
+        };
+
+        Ok(vec![target])
     }
 }

@@ -59,7 +59,13 @@ pub fn scan_cleaner(cleaner: &dyn Cleaner) -> CleanerScan {
         (Vec::new(), None)
     } else {
         match cleaner.scan() {
-            Ok(targets) => (targets, None),
+            Ok(targets) => (
+                targets
+                    .into_iter()
+                    .filter(|target| target.size_bytes > 0)
+                    .collect(),
+                None,
+            ),
             Err(error) => (Vec::new(), Some(format!("{error:#}"))),
         }
     };
@@ -93,4 +99,53 @@ pub fn scan_all(only: Option<&[String]>) -> Vec<CleanerScan> {
         .collect::<Vec<_>>();
     scans.sort_by(|left, right| left.cleaner_id.cmp(&right.cleaner_id));
     scans
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{scan_cleaner, Cleaner};
+    use crate::model::{Category, CleanMethod, CleanTarget, RiskLevel};
+    use anyhow::Result;
+    use std::path::PathBuf;
+
+    struct EmptyTargetCleaner;
+
+    impl Cleaner for EmptyTargetCleaner {
+        fn id(&self) -> &'static str {
+            "empty-target-test"
+        }
+
+        fn display_name(&self) -> &'static str {
+            "Empty target test"
+        }
+
+        fn category(&self) -> Category {
+            Category::ManualReview
+        }
+
+        fn risk_level(&self) -> RiskLevel {
+            RiskLevel::Caution
+        }
+
+        fn is_available(&self) -> bool {
+            true
+        }
+
+        fn scan(&self) -> Result<Vec<CleanTarget>> {
+            Ok(vec![CleanTarget {
+                path: PathBuf::from("cache://empty"),
+                size_bytes: 0,
+                description: "already empty".to_owned(),
+                method: CleanMethod::TrashPath,
+            }])
+        }
+    }
+
+    #[test]
+    fn scan_cleaner_drops_zero_byte_targets() {
+        let report = scan_cleaner(&EmptyTargetCleaner);
+
+        assert!(report.error.is_none());
+        assert!(report.targets.is_empty());
+    }
 }

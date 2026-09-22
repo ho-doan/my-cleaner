@@ -1,23 +1,26 @@
 use anyhow::Result;
 use cleanrs_core::{
-    all_cleaners, scan_cleaner, Category, CleanResult, CleanTarget, CleanerScan, RiskLevel,
+    all_cleaners, full_disk_scan, scan_cleaner, Category, CleanResult, CleanTarget, CleanerScan,
+    FullDiskScan, RiskLevel,
 };
 use crossterm::{
     event::{self, Event, KeyCode, KeyEvent, KeyEventKind},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
+use fs2::{available_space, total_space};
 use humansize::{format_size, DECIMAL};
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{Block, Borders, Gauge, List, ListItem, ListState, Paragraph, Wrap},
     Frame, Terminal,
 };
 use std::{
     io::{self, Stdout},
+    path::Path,
     sync::mpsc::{self, Receiver, TryRecvError},
     thread,
     time::Duration,
@@ -49,7 +52,26 @@ enum Mode {
     Reviewing,
     Confirming,
     Cleaning,
-    Done,
+}
+
+#[derive(Clone, Copy)]
+struct DiskUsage {
+    total_bytes: u64,
+    free_bytes: u64,
+}
+
+impl DiskUsage {
+    fn used_bytes(self) -> u64 {
+        self.total_bytes.saturating_sub(self.free_bytes)
+    }
+
+    fn used_ratio(self) -> f64 {
+        if self.total_bytes == 0 {
+            0.0
+        } else {
+            self.used_bytes() as f64 / self.total_bytes as f64
+        }
+    }
 }
 
 struct App {
@@ -62,6 +84,12 @@ struct App {
     expected_scans: usize,
     results: Vec<CleanResult>,
     errors: Vec<String>,
+    disk: Option<DiskUsage>,
+    full_disk: Option<FullDiskScan>,
+    full_disk_scanning: bool,
+    full_disk_error: Option<String>,
+    show_full_disk: bool,
+    last_action: Option<String>,
 }
 
 impl App {
@@ -76,7 +104,24 @@ impl App {
             expected_scans,
             results: Vec::new(),
             errors: Vec::new(),
+            disk: read_disk_usage(),
+            full_disk: None,
+            full_disk_scanning: false,
+            full_disk_error: None,
+            show_full_disk: false,
+            last_action: None,
         }
+    }
+
+    fn reset_for_scan(&mut self, expected_scans: usize) {
+        self.mode = Mode::Scanning;
+        self.rows.clear();
+        self.cursor = 0;
+        self.received_scans = 0;
+        self.expected_scans = expected_scans;
+        self.confirm_text.clear();
+        self.show_full_disk = false;
+        self.disk = read_disk_usage().or(self.disk);
     }
 
     fn add_scan(&mut self, report: CleanerScan) {
@@ -139,7 +184,23 @@ impl App {
     }
 }
 
-fn run_loop(stdout: &mut Stdout) -> Result<()> {
+fn read_disk_usage() -> Option<DiskUsage> {
+    let total_bytes = total_space("/").ok()?;
+    let free_bytes = available_space("/").ok()?;
+    Some(DiskUsage {
+        total_bytes,
+        free_bytes,
+    })
+}
+
+enum KeyAction {
+    Continue,
+    FullDisk,
+    Quit,
+    Rescan,
+}
+
+fn start_scan() -> (usize, Receiver<CleanerScan>) {
     let cleaners = all_cleaners();
     let expected_scans = cleaners.len();
     let (sender, receiver) = mpsc::channel();
@@ -151,18 +212,50 @@ fn run_loop(stdout: &mut Stdout) -> Result<()> {
         });
     }
     drop(sender);
+    (expected_scans, receiver)
+}
+
+fn start_full_disk_scan() -> Receiver<Result<FullDiskScan, String>> {
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let result = full_disk_scan(Path::new("/"), 12).map_err(|error| format!("{error:#}"));
+        let _ = sender.send(result);
+    });
+    receiver
+}
+
+fn run_loop(stdout: &mut Stdout) -> Result<()> {
+    let (expected_scans, mut receiver) = start_scan();
+    let mut full_disk_receiver: Option<Receiver<Result<FullDiskScan, String>>> = None;
 
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
     let mut app = App::new(expected_scans);
     let result = loop {
         receive_scans(&mut app, &receiver);
+        receive_full_disk_scan(&mut app, &mut full_disk_receiver);
         terminal.draw(|frame| render(frame, &app))?;
 
         if event::poll(Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press && handle_key(&mut app, key) {
-                    break Ok(());
+                if key.kind == KeyEventKind::Press {
+                    match handle_key(&mut app, key) {
+                        KeyAction::Quit => break Ok(()),
+                        KeyAction::FullDisk => {
+                            if !app.full_disk_scanning {
+                                app.full_disk_scanning = true;
+                                app.full_disk_error = None;
+                                app.show_full_disk = true;
+                                full_disk_receiver = Some(start_full_disk_scan());
+                            }
+                        }
+                        KeyAction::Rescan => {
+                            let (expected, next_receiver) = start_scan();
+                            app.reset_for_scan(expected);
+                            receiver = next_receiver;
+                        }
+                        KeyAction::Continue => {}
+                    }
                 }
             }
         }
@@ -178,6 +271,7 @@ fn receive_scans(app: &mut App, receiver: &Receiver<CleanerScan>) {
             Err(TryRecvError::Empty) => break,
             Err(TryRecvError::Disconnected) => {
                 if matches!(app.mode, Mode::Scanning) {
+                    app.disk = read_disk_usage().or(app.disk);
                     app.mode = Mode::Reviewing;
                 }
                 break;
@@ -185,13 +279,40 @@ fn receive_scans(app: &mut App, receiver: &Receiver<CleanerScan>) {
         }
     }
     if app.received_scans == app.expected_scans && matches!(app.mode, Mode::Scanning) {
+        app.disk = read_disk_usage().or(app.disk);
         app.mode = Mode::Reviewing;
     }
 }
 
-fn handle_key(app: &mut App, key: KeyEvent) -> bool {
+fn receive_full_disk_scan(
+    app: &mut App,
+    receiver: &mut Option<Receiver<Result<FullDiskScan, String>>>,
+) {
+    let message = receiver.as_ref().map(|channel| channel.try_recv());
+    match message {
+        Some(Ok(Ok(report))) => {
+            app.full_disk = Some(report);
+            app.full_disk_scanning = false;
+            app.full_disk_error = None;
+            *receiver = None;
+        }
+        Some(Ok(Err(error))) => {
+            app.full_disk_scanning = false;
+            app.full_disk_error = Some(error);
+            *receiver = None;
+        }
+        Some(Err(TryRecvError::Disconnected)) => {
+            app.full_disk_scanning = false;
+            app.full_disk_error = Some("full-disk scan stopped unexpectedly".to_owned());
+            *receiver = None;
+        }
+        Some(Err(TryRecvError::Empty)) | None => {}
+    }
+}
+
+fn handle_key(app: &mut App, key: KeyEvent) -> KeyAction {
     if key.code == KeyCode::Char('q') {
-        return true;
+        return KeyAction::Quit;
     }
 
     match app.mode {
@@ -202,20 +323,26 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
             KeyCode::Char(' ') => app.toggle_current(),
             KeyCode::Char('a') => app.select_all_safe(),
             KeyCode::Char('d') => app.dry_run = !app.dry_run,
+            KeyCode::Char('f') => return KeyAction::FullDisk,
+            KeyCode::Char('b') if app.show_full_disk => app.show_full_disk = false,
+            KeyCode::Char('r') => return KeyAction::Rescan,
             KeyCode::Enter if app.selected_count() > 0 => {
                 app.confirm_text.clear();
                 app.mode = Mode::Confirming;
             }
             _ => {}
         },
-        Mode::Confirming => handle_confirmation(app, key),
+        Mode::Confirming => {
+            if handle_confirmation(app, key) {
+                return KeyAction::Rescan;
+            }
+        }
         Mode::Cleaning => {}
-        Mode::Done => {}
     }
-    false
+    KeyAction::Continue
 }
 
-fn handle_confirmation(app: &mut App, key: KeyEvent) {
+fn handle_confirmation(app: &mut App, key: KeyEvent) -> bool {
     let manual = app.has_manual_selection();
     match key.code {
         KeyCode::Esc | KeyCode::Char('n') => {
@@ -230,10 +357,14 @@ fn handle_confirmation(app: &mut App, key: KeyEvent) {
         }
         _ => {}
     }
+    matches!(app.mode, Mode::Cleaning)
 }
 
 fn execute_selected(app: &mut App) {
     app.mode = Mode::Cleaning;
+    app.results.clear();
+    app.errors.clear();
+    let disk_before = app.disk.or_else(read_disk_usage);
     let cleaners = all_cleaners();
     for row in app.rows.iter().filter(|row| row.selected) {
         let Some(cleaner) = cleaners
@@ -249,16 +380,34 @@ fn execute_selected(app: &mut App) {
             Err(error) => app.errors.push(format!("{}: {error:#}", row.cleaner_id)),
         }
     }
-    app.mode = Mode::Done;
+    let action = if app.dry_run { "Previewed" } else { "Cleaned" };
+    let estimated_freed = app
+        .results
+        .iter()
+        .map(|result| result.expected_freed_bytes)
+        .sum::<u64>();
+    let disk_after = read_disk_usage().or(disk_before);
+    let actual_free_change = match (disk_before, disk_after) {
+        (Some(before), Some(after)) => after.free_bytes.saturating_sub(before.free_bytes),
+        _ => 0,
+    };
+    app.disk = disk_after;
+    app.last_action = Some(format!(
+        "{action} {} target(s), estimated {} freed, actual free change {}; {} error(s); scan refreshed",
+        app.results.len(),
+        format_size(estimated_freed, DECIMAL),
+        format_size(actual_free_change, DECIMAL),
+        app.errors.len()
+    ));
 }
 
 fn render(frame: &mut Frame, app: &App) {
     let vertical = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),
-            Constraint::Min(5),
-            Constraint::Length(3),
+            Constraint::Length(5),
+            Constraint::Min(6),
+            Constraint::Length(4),
         ])
         .split(frame.area());
 
@@ -270,19 +419,52 @@ fn render(frame: &mut Frame, app: &App) {
         Mode::Reviewing => " cleanrs — review targets ".to_owned(),
         Mode::Confirming => " cleanrs — confirm ".to_owned(),
         Mode::Cleaning => " cleanrs — cleaning ".to_owned(),
-        Mode::Done => " cleanrs — done ".to_owned(),
+    };
+    let header = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Length(1)])
+        .split(vertical[0]);
+    let disk_line = match app.disk {
+        Some(disk) => format!(
+            "Disk /  Used {}  |  Free {}  |  Total {}",
+            format_size(disk.used_bytes(), DECIMAL),
+            format_size(disk.free_bytes, DECIMAL),
+            format_size(disk.total_bytes, DECIMAL)
+        ),
+        None => "Disk /  usage unavailable".to_owned(),
     };
     frame.render_widget(
-        Paragraph::new(title).block(Block::default().borders(Borders::ALL)),
-        vertical[0],
+        Paragraph::new(vec![Line::from(title), Line::from(disk_line)])
+            .block(Block::default().borders(Borders::ALL)),
+        header[0],
     );
+    if let Some(disk) = app.disk {
+        let gauge_color = if disk.used_ratio() >= 0.9 {
+            Color::Red
+        } else if disk.used_ratio() >= 0.75 {
+            Color::Yellow
+        } else {
+            Color::Green
+        };
+        frame.render_widget(
+            Gauge::default()
+                .ratio(disk.used_ratio())
+                .gauge_style(Style::default().fg(gauge_color))
+                .label(format!("{:.1}% used", disk.used_ratio() * 100.0)),
+            header[1],
+        );
+    }
 
     let body = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(24), Constraint::Percentage(76)])
         .split(vertical[1]);
     render_sidebar(frame, app, body[0]);
-    render_targets(frame, app, body[1]);
+    if app.show_full_disk {
+        render_full_disk(frame, app, body[1]);
+    } else {
+        render_targets(frame, app, body[1]);
+    }
 
     let footer = footer_text(app);
     frame.render_widget(
@@ -317,10 +499,90 @@ fn render_sidebar(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         "Mode: {}",
         if app.dry_run { "dry-run" } else { "execute" }
     )));
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "Full disk",
+        Style::default().add_modifier(Modifier::BOLD),
+    )));
+    if app.full_disk_scanning {
+        lines.push(Line::from("Scanning…"));
+    } else if let Some(error) = &app.full_disk_error {
+        lines.push(Line::from(format!("Error: {error}")));
+    } else if let Some(report) = &app.full_disk {
+        let root_total = report
+            .root_entries
+            .iter()
+            .map(|entry| entry.size_bytes)
+            .sum::<u64>();
+        let home_total = report
+            .home_entries
+            .iter()
+            .map(|entry| entry.size_bytes)
+            .sum::<u64>();
+        lines.push(Line::from(format!(
+            "Top root: {}",
+            format_size(root_total, DECIMAL)
+        )));
+        lines.push(Line::from(format!(
+            "Top HOME: {}",
+            format_size(home_total, DECIMAL)
+        )));
+        lines.push(Line::from(format!(
+            "Blocked: {}",
+            report.inaccessible_paths
+        )));
+    } else {
+        lines.push(Line::from("Press [f] to scan"));
+    }
+    if let Some(action) = &app.last_action {
+        lines.push(Line::from(""));
+        lines.push(Line::from(action.as_str()));
+    }
     frame.render_widget(
         Paragraph::new(lines).block(Block::default().borders(Borders::ALL)),
         area,
     );
+}
+
+fn render_full_disk(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
+    let mut items = Vec::new();
+    items.push(ListItem::new("Read-only inventory — no delete targets"));
+
+    if app.full_disk_scanning {
+        items.push(ListItem::new("Scanning root disk and HOME in background…"));
+    } else if let Some(error) = &app.full_disk_error {
+        items.push(ListItem::new(format!("Scan error: {error}")));
+    } else if let Some(report) = &app.full_disk {
+        items.push(ListItem::new("Largest root entries:"));
+        items.extend(report.root_entries.iter().map(|entry| {
+            ListItem::new(format!(
+                "{}  {}",
+                format_size(entry.size_bytes, DECIMAL),
+                entry.path.display()
+            ))
+        }));
+        items.push(ListItem::new(""));
+        items.push(ListItem::new("Largest HOME entries:"));
+        items.extend(report.home_entries.iter().map(|entry| {
+            ListItem::new(format!(
+                "{}  {}",
+                format_size(entry.size_bytes, DECIMAL),
+                entry.path.display()
+            ))
+        }));
+        items.push(ListItem::new(format!(
+            "Excluded: {}  |  Inaccessible: {}",
+            report.excluded_paths.len(),
+            report.inaccessible_paths
+        )));
+    } else {
+        items.push(ListItem::new("Press [f] to start a full-disk scan."));
+    }
+
+    let list = List::new(items)
+        .block(Block::default().borders(Borders::ALL).title("Full disk"))
+        .highlight_style(Style::default().bg(Color::DarkGray));
+    frame.render_widget(list, area);
 }
 
 fn render_targets(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
@@ -331,14 +593,21 @@ fn render_targets(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
             .iter()
             .map(|row| {
                 let checkbox = if row.selected { "[x]" } else { "[ ]" };
-                let label = format!(
-                    "{checkbox} {} — {} ({}, {:?})",
-                    row.cleaner_name,
-                    row.target.description,
-                    format_size(row.target.size_bytes, DECIMAL),
-                    row.risk
-                );
-                ListItem::new(label)
+                let risk_style = match row.risk {
+                    RiskLevel::Safe => Style::default().fg(Color::Green),
+                    RiskLevel::Caution => Style::default().fg(Color::Yellow),
+                    RiskLevel::Manual => Style::default().fg(Color::Red),
+                };
+                ListItem::new(Line::from(vec![
+                    Span::raw(format!(
+                        "{checkbox} {} — {} ({}, ",
+                        row.cleaner_name,
+                        row.target.description,
+                        format_size(row.target.size_bytes, DECIMAL),
+                    )),
+                    Span::styled(format!("{:?}", row.risk), risk_style),
+                    Span::raw(")"),
+                ]))
             })
             .collect()
     };
@@ -356,8 +625,14 @@ fn footer_text(app: &App) -> String {
     match app.mode {
         Mode::Scanning => "Scanning in background…  [q] quit".to_owned(),
         Mode::Reviewing => {
-            " [↑/↓] move  [space] toggle  [a] select Safe  [d] dry-run  [enter] continue  [q] quit"
-                .to_owned()
+            if app.show_full_disk {
+                return "Full-disk inventory is read-only. [f] rescan  [b] back to targets  [q] quit"
+                    .to_owned();
+            }
+            let action = app.last_action.as_deref().unwrap_or("Ready for review");
+            format!(
+                "{action}\n[↑/↓] move  [space] toggle  [a] select Safe  [d] dry-run  [r] reload  [f] full disk  [enter] continue  [q] quit"
+            )
         }
         Mode::Confirming if app.has_manual_selection() && !app.dry_run => format!(
             "Docker/manual selected. Type FORCE then [enter] to execute, [n] cancel. Current: {}",
@@ -369,10 +644,5 @@ fn footer_text(app: &App) -> String {
             if app.dry_run { "dry-run" } else { "execute" }
         ),
         Mode::Cleaning => "Working…".to_owned(),
-        Mode::Done => format!(
-            "Completed {} operation(s), {} error(s). [q] quit",
-            app.results.len(),
-            app.errors.len()
-        ),
     }
 }

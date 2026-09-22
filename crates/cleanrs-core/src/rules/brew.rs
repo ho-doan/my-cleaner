@@ -1,6 +1,5 @@
-use super::{command_available, command_output};
+use super::{command_available, command_output, non_empty_target};
 use crate::model::{Category, CleanMethod, CleanTarget, RiskLevel};
-use crate::scanner::dir_size;
 use crate::Cleaner;
 use anyhow::Result;
 use std::path::PathBuf;
@@ -34,19 +33,19 @@ impl Cleaner for BrewCleaner {
             return Ok(Vec::new());
         }
         let path = PathBuf::from(cache);
-        if !path.exists() {
-            return Ok(Vec::new());
-        }
-
-        Ok(vec![CleanTarget {
-            size_bytes: dir_size(&path)?,
+        let Some(target) = non_empty_target(
             path,
-            description: "Homebrew downloads and old formula archives".to_owned(),
-            method: CleanMethod::RunCommand(vec![
+            "Homebrew downloads and old formula archives",
+            CleanMethod::RunCommand(vec![
                 "brew".to_owned(),
                 "cleanup".to_owned(),
                 "-s".to_owned(),
             ]),
-        }])
+        )?
+        else {
+            return Ok(Vec::new());
+        };
+
+        Ok(vec![target])
     }
 }

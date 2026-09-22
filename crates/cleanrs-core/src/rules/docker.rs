@@ -42,6 +42,10 @@ impl Cleaner for DockerCleaner {
             .filter_map(|(_, value)| parse_size(value))
             .sum();
 
+        if reclaimable_bytes == 0 {
+            return Ok(Vec::new());
+        }
+
         Ok(vec![CleanTarget {
             path: PathBuf::from("docker://system"),
             size_bytes: reclaimable_bytes,

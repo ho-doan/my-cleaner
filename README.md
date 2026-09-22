@@ -9,6 +9,7 @@ Code, Kiro CLI, Ollama, and other known cache locations).
 
     cargo run -p cleanrs -- list
     cargo run -p cleanrs -- scan
+    cargo run -p cleanrs -- scan --full-disk
     cargo run -p cleanrs -- tui
     cargo run -p cleanrs -- scan --only npm,brew --json
     cargo run -p cleanrs -- clean --only npm
@@ -26,3 +27,9 @@ unused volumes; it requires both --yes and --force.
 Agent session/history data and Ollama models are treated as Manual-risk. Ollama
 models are removed through the official ollama rm command, never by deleting
 the model store directly. Active Codex and Claude runtimes are preserved.
+
+The TUI shows root-disk Used/Free/Total and a usage gauge. Press r to reload a
+scan manually; after a clean confirmation it automatically rescans and refreshes
+the disk snapshot. Press f for a read-only inventory of the largest root-disk
+and HOME directories; b returns to cleanup targets. Full-disk inventory never
+creates delete targets.
