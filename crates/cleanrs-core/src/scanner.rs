@@ -172,16 +172,8 @@ pub fn scan_directory(path: &Path, limit: usize) -> Result<DirectoryScan> {
         .into_par_iter()
         .map(|child| {
             if readonly_paths.contains(&child) {
-                return (
-                    Some(DirectoryScanEntry {
-                        path: child,
-                        size_bytes: 0,
-                        is_dir: true,
-                        read_only: true,
-                        suggestion: None,
-                    }),
-                    0usize,
-                );
+                let (entry, inaccessible) = readonly_directory_entry(child);
+                return (Some(entry), inaccessible);
             }
 
             let Ok(metadata) = std::fs::symlink_metadata(&child) else {
@@ -358,6 +350,20 @@ fn scan_children(parent: &Path, excluded: &[PathBuf]) -> Result<(Vec<DiskScanEnt
     Ok((entries, inaccessible))
 }
 
+fn readonly_directory_entry(path: PathBuf) -> (DirectoryScanEntry, usize) {
+    let (size_bytes, inaccessible) = tolerant_dir_size(&path);
+    (
+        DirectoryScanEntry {
+            path,
+            size_bytes,
+            is_dir: true,
+            read_only: true,
+            suggestion: None,
+        },
+        inaccessible,
+    )
+}
+
 fn scan_readonly_paths(paths: &[PathBuf]) -> (Vec<DiskScanEntry>, usize) {
     let results = paths
         .par_iter()
@@ -409,7 +415,8 @@ fn tolerant_dir_size(path: &Path) -> (u64, usize) {
 #[cfg(test)]
 mod tests {
     use super::{
-        dir_size, file_suggestion, is_protected_path, scan_directory, scan_readonly_paths,
+        dir_size, file_suggestion, is_protected_path, readonly_directory_entry, scan_directory,
+        scan_readonly_paths,
     };
     use std::fs;
     use std::path::Path;
@@ -515,6 +522,19 @@ mod tests {
         assert_eq!(inaccessible, 0);
         assert_eq!(entries[0].size_bytes, 32);
         assert!(entries[0].read_only);
+    }
+
+    #[test]
+    fn readonly_directory_entries_keep_recursive_size() {
+        let root = tempdir().expect("temporary directory");
+        fs::create_dir(root.path().join("nested")).expect("create nested directory");
+        fs::write(root.path().join("nested/data.bin"), vec![0_u8; 17]).expect("write nested data");
+
+        let (entry, inaccessible) = readonly_directory_entry(root.path().to_path_buf());
+
+        assert_eq!(inaccessible, 0);
+        assert_eq!(entry.size_bytes, 17);
+        assert!(entry.read_only);
     }
 
     #[test]
