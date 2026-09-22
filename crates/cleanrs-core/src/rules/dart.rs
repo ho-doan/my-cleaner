@@ -33,12 +33,15 @@ impl Cleaner for DartCleaner {
         let Some(target) = non_empty_target(
             path,
             "Dart package cache",
-            CleanMethod::RunCommand(vec![
-                "dart".to_owned(),
-                "pub".to_owned(),
-                "cache".to_owned(),
-                "clean".to_owned(),
-            ]),
+            CleanMethod::RunCommandWithInput {
+                arguments: vec![
+                    "dart".to_owned(),
+                    "pub".to_owned(),
+                    "cache".to_owned(),
+                    "clean".to_owned(),
+                ],
+                stdin: "y\n".to_owned(),
+            },
         )?
         else {
             return Ok(Vec::new());

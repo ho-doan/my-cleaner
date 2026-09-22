@@ -21,6 +21,10 @@ The clean command is a preview by default. Cleaning never runs unless --yes is
 present. Rules invoke the package manager's own cleanup command instead of
 deleting its internal files directly.
 
+Interactive cleanup prompts are handled by the rule. For example, Dart's
+`pub cache clean` receives an explicit `y` only after the user confirms execute
+mode; cleanup processes never inherit the TUI's stdin.
+
 Docker cleanup is Manual-risk because the official prune command also removes
 unused volumes; it requires both --yes and --force.
 

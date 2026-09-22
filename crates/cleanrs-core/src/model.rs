@@ -26,6 +26,12 @@ pub enum CleanMethod {
     /// Run an executable directly. Arguments are kept separate so no shell is
     /// involved and rule definitions cannot accidentally expand shell syntax.
     RunCommand(Vec<String>),
+    /// Run an executable directly while providing explicit stdin. This is for
+    /// trusted commands whose own confirmation prompt is part of the rule.
+    RunCommandWithInput {
+        arguments: Vec<String>,
+        stdin: String,
+    },
     /// Move a path to the operating system trash.
     TrashPath,
 }
