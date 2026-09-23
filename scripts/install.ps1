@@ -1,6 +1,14 @@
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 
+# Windows PowerShell 5.1 may default to TLS 1.0/1.1, which GitHub rejects.
+try {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+} catch {
+    # Keep the installer usable on PowerShell implementations that do not expose
+    # ServicePointManager; curl.exe still negotiates TLS independently.
+}
+
 $Repository = if ($env:CLEANRS_REPOSITORY) { $env:CLEANRS_REPOSITORY } else { "ho-doan/my-cleaner" }
 $InstallDir = if ($env:CLEANRS_INSTALL_DIR) {
     $env:CLEANRS_INSTALL_DIR
@@ -9,32 +17,102 @@ $InstallDir = if ($env:CLEANRS_INSTALL_DIR) {
 }
 $RetryAttempts = 6
 
+function Get-CurlPath {
+    $curlCommand = Get-Command curl.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($null -eq $curlCommand) {
+        return $null
+    }
+    return $curlCommand.Source
+}
+
+function Get-AttemptUri([string] $Uri, [int] $Attempt) {
+    $separator = if ($Uri.Contains("?")) { "&" } else { "?" }
+    return "$Uri$separator" + "attempt=$Attempt"
+}
+
+function Invoke-TextWithRetry([string] $Uri, [string] $Description) {
+    $lastError = "unknown error"
+    for ($attempt = 1; $attempt -le $RetryAttempts; $attempt++) {
+        try {
+            Write-Host "$Description ($attempt/$RetryAttempts)..."
+            $requestUri = Get-AttemptUri $Uri $attempt
+            $curlPath = Get-CurlPath
+            if ($null -ne $curlPath) {
+                $curlArguments = @(
+                    "--fail", "--silent", "--show-error", "--location",
+                    "--retry", "3", "--retry-delay", "2",
+                    "--connect-timeout", "15", "--max-time", "120",
+                    "-H", "Cache-Control: no-cache", "-H", "Pragma: no-cache",
+                    $requestUri
+                )
+                $response = & $curlPath @curlArguments
+                if ($LASTEXITCODE -ne 0) {
+                    throw "curl.exe exited with status $LASTEXITCODE."
+                }
+                return ($response -join [Environment]::NewLine)
+            }
+
+            return (Invoke-WebRequest -UseBasicParsing -Headers @{ "Cache-Control" = "no-cache"; Pragma = "no-cache" } -TimeoutSec 120 -Uri $requestUri).Content
+        } catch {
+            $lastError = $_.Exception.Message
+            if ($attempt -eq $RetryAttempts) {
+                break
+            }
+            $delay = [Math]::Min(2 * [Math]::Pow(2, $attempt - 1), 8)
+            Write-Warning "$Description failed: $lastError. Retrying in $delay seconds."
+            Start-Sleep -Seconds $delay
+        }
+    }
+    throw "$Description failed after $RetryAttempts attempts. Last error: $lastError"
+}
+
 function Get-ReleaseVersion {
     if ($env:CLEANRS_VERSION) {
         return $env:CLEANRS_VERSION.TrimStart("v")
     }
 
-    $release = Invoke-RestMethod -UseBasicParsing -Uri "https://api.github.com/repos/$Repository/releases/latest"
+    $releaseJson = Invoke-TextWithRetry "https://api.github.com/repos/$Repository/releases/latest" "Checking latest release"
+    $release = $releaseJson | ConvertFrom-Json
     if ($null -eq $release -or [string]::IsNullOrWhiteSpace([string]$release.tag_name)) {
         throw "GitHub did not return a latest release tag for $Repository."
     }
     return ([string]$release.tag_name).TrimStart("v")
 }
 
-function Invoke-DownloadWithRetry([string] $Uri, [string] $OutputFile) {
+function Invoke-DownloadWithRetry([string] $Uri, [string] $OutputFile, [string] $Description) {
+    $lastError = "unknown error"
     for ($attempt = 1; $attempt -le $RetryAttempts; $attempt++) {
         try {
-            Write-Host "Downloading installer metadata ($attempt/$RetryAttempts)..."
-            Invoke-WebRequest -UseBasicParsing -Headers @{ "Cache-Control" = "no-cache"; Pragma = "no-cache" } -Uri "$Uri&attempt=$attempt" -OutFile $OutputFile
+            Write-Host "$Description ($attempt/$RetryAttempts)..."
+            $requestUri = Get-AttemptUri $Uri $attempt
+            $curlPath = Get-CurlPath
+            if ($null -ne $curlPath) {
+                $curlArguments = @(
+                    "--fail", "--silent", "--show-error", "--location",
+                    "--retry", "3", "--retry-delay", "2",
+                    "--connect-timeout", "15", "--max-time", "300",
+                    "-H", "Cache-Control: no-cache", "-H", "Pragma: no-cache",
+                    "--output", $OutputFile, $requestUri
+                )
+                & $curlPath @curlArguments
+                if ($LASTEXITCODE -ne 0) {
+                    throw "curl.exe exited with status $LASTEXITCODE."
+                }
+            } else {
+                Invoke-WebRequest -UseBasicParsing -Headers @{ "Cache-Control" = "no-cache"; Pragma = "no-cache" } -TimeoutSec 300 -Uri $requestUri -OutFile $OutputFile
+            }
             return
         } catch {
+            $lastError = $_.Exception.Message
             if ($attempt -eq $RetryAttempts) {
-                throw
+                break
             }
             $delay = [Math]::Min(2 * [Math]::Pow(2, $attempt - 1), 8)
+            Write-Warning "$Description failed: $lastError. Retrying in $delay seconds."
             Start-Sleep -Seconds $delay
         }
     }
+    throw "$Description failed after $RetryAttempts attempts. Last error: $lastError"
 }
 
 function Get-ExpectedChecksum([string] $Manifest, [string] $Archive) {
@@ -88,12 +166,11 @@ $ManifestPath = Join-Path $TempDir "checksums.txt"
 New-Item -ItemType Directory -Path $TempDir -Force | Out-Null
 try {
     $checksumsUrl = "$BaseUrl/checksums.txt?version=$Version"
-    Invoke-DownloadWithRetry $checksumsUrl $ManifestPath
+    Invoke-DownloadWithRetry $checksumsUrl $ManifestPath "Downloading installer metadata"
     $manifest = Get-Content -Raw -Path $ManifestPath
     $expected = Get-ExpectedChecksum $manifest $Archive
 
-    Write-Host "Downloading cleanrs $Version for $Target..."
-    Invoke-DownloadWithRetry "$BaseUrl/$Archive?version=$Version" $ArchivePath
+    Invoke-DownloadWithRetry "$BaseUrl/$Archive?version=$Version" $ArchivePath "Downloading cleanrs $Version for $Target"
     $actual = (Get-FileHash -Algorithm SHA256 -Path $ArchivePath).Hash.ToLowerInvariant()
     if ($actual -ne $expected) {
         throw "Checksum verification failed. Expected $expected, got $actual."
