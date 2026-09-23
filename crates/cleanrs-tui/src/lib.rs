@@ -2025,34 +2025,7 @@ fn render_targets(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     } else {
         app.rows
             .iter()
-            .map(|row| {
-                let checkbox = if row.selected { "[x]" } else { "[ ]" };
-                let checkbox_color = if row.selected {
-                    Color::Green
-                } else {
-                    Color::DarkGray
-                };
-                let risk_style = match row.risk {
-                    RiskLevel::Safe => Style::default().fg(Color::Green),
-                    RiskLevel::Caution => Style::default().fg(Color::Yellow),
-                    RiskLevel::Manual => Style::default().fg(Color::Red),
-                    RiskLevel::Destructive => Style::default().fg(Color::Magenta),
-                };
-                ListItem::new(Line::from(vec![
-                    Span::styled(format!("{checkbox} "), Style::default().fg(checkbox_color)),
-                    Span::styled(
-                        row.cleaner_name.as_str(),
-                        Style::default().add_modifier(Modifier::BOLD),
-                    ),
-                    Span::raw("  ·  "),
-                    Span::raw(row.target.description.as_str()),
-                    Span::styled(
-                        format!("  ·  {}", format_size(row.target.size_bytes, DECIMAL)),
-                        Style::default().fg(Color::Gray),
-                    ),
-                    Span::styled(format!("  {:?}", row.risk), risk_style),
-                ]))
-            })
+            .map(|row| target_list_item(row, area.width.saturating_sub(6) as usize))
             .collect()
     };
     let mut state = ListState::default();
@@ -2129,6 +2102,119 @@ fn render_targets(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
             .title("Special review · destructive / read-only"),
     );
     frame.render_widget(special, sections[1]);
+}
+
+fn target_list_item(row: &TargetRow, width: usize) -> ListItem<'static> {
+    let checkbox = if row.selected { "[x]" } else { "[ ]" };
+    let checkbox_color = if row.selected {
+        Color::Green
+    } else {
+        Color::DarkGray
+    };
+    let risk_style = match row.risk {
+        RiskLevel::Safe => Style::default().fg(Color::Green),
+        RiskLevel::Caution => Style::default().fg(Color::Yellow),
+        RiskLevel::Manual => Style::default().fg(Color::Red),
+        RiskLevel::Destructive => Style::default().fg(Color::Magenta),
+    };
+    let size = format_size(row.target.size_bytes, DECIMAL);
+    let risk = format!("{:?}", row.risk);
+    let full_text = format!(
+        "{checkbox} {}  ·  {}  ·  {size}  {risk}",
+        row.cleaner_name, row.target.description
+    );
+
+    if full_text.chars().count() <= width {
+        return ListItem::new(Line::from(vec![
+            Span::styled(format!("{checkbox} "), Style::default().fg(checkbox_color)),
+            Span::styled(
+                row.cleaner_name.to_owned(),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("  ·  "),
+            Span::raw(row.target.description.clone()),
+            Span::styled(format!("  ·  {size}"), Style::default().fg(Color::Gray)),
+            Span::styled(format!("  {risk}"), risk_style),
+        ]));
+    }
+
+    let header = format!("{checkbox} {}  ·  {size}  {risk}", row.cleaner_name);
+    let description_indent = "  ↳ ";
+    let description_width = width
+        .saturating_sub(description_indent.chars().count())
+        .max(1);
+    let mut lines = wrap_text(&header, width)
+        .into_iter()
+        .enumerate()
+        .map(|(index, line)| {
+            if index == 0 {
+                Line::from(vec![Span::styled(
+                    line,
+                    Style::default()
+                        .fg(checkbox_color)
+                        .add_modifier(Modifier::BOLD),
+                )])
+            } else {
+                Line::from(line)
+            }
+        })
+        .collect::<Vec<_>>();
+    lines.extend(
+        wrap_text(&row.target.description, description_width)
+            .into_iter()
+            .map(|line| {
+                Line::from(vec![
+                    Span::styled(description_indent, Style::default().fg(Color::DarkGray)),
+                    Span::raw(line),
+                ])
+            }),
+    );
+    ListItem::new(lines)
+}
+
+fn wrap_text(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut lines = Vec::new();
+    let mut current = String::new();
+
+    for word in text.split_whitespace() {
+        if word.chars().count() <= width {
+            let candidate_width =
+                current.chars().count() + usize::from(!current.is_empty()) + word.chars().count();
+            if candidate_width <= width {
+                if !current.is_empty() {
+                    current.push(' ');
+                }
+                current.push_str(word);
+                continue;
+            }
+            if !current.is_empty() {
+                lines.push(std::mem::take(&mut current));
+            }
+            current.push_str(word);
+            continue;
+        }
+
+        if !current.is_empty() {
+            lines.push(std::mem::take(&mut current));
+        }
+        let mut chunk = String::new();
+        for character in word.chars() {
+            chunk.push(character);
+            if chunk.chars().count() == width {
+                lines.push(std::mem::take(&mut chunk));
+            }
+        }
+        current = chunk;
+    }
+
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
 }
 
 fn footer_lines(app: &App) -> Vec<Line<'static>> {
