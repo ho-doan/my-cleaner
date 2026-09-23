@@ -104,12 +104,10 @@ pub fn full_disk_scan(root: &Path, limit: usize) -> Result<FullDiskScan> {
     root_entries.truncate(limit);
     readonly_entries.sort_by_key(|entry| entry.path.clone());
 
-    let (mut home_entries, home_inaccessible) = match std::env::var_os("HOME") {
-        Some(home) => scan_children(Path::new(&home), &[])?,
+    let (home_entries, home_inaccessible) = match std::env::var_os("HOME") {
+        Some(home) => scan_home_entries(Path::new(&home), limit)?,
         None => (Vec::new(), 0),
     };
-    home_entries.sort_by_key(|entry| std::cmp::Reverse(entry.size_bytes));
-    home_entries.truncate(limit);
 
     Ok(FullDiskScan {
         root: root.to_path_buf(),
@@ -267,9 +265,9 @@ fn directory_suggestion(path: &Path, allowlisted: bool) -> Option<DirectorySugge
             can_delete: true,
         });
     }
-    if is_download_item(path) {
+    if let Some(area) = user_file_area(path) {
         return Some(DirectorySuggestion {
-            reason: "item inside Downloads; move to Trash after confirmation".to_owned(),
+            reason: format!("item inside {area}; move to Trash after confirmation"),
             can_delete: true,
         });
     }
@@ -303,9 +301,9 @@ fn directory_suggestion(path: &Path, allowlisted: bool) -> Option<DirectorySugge
 
 fn file_suggestion(path: &Path) -> Option<DirectorySuggestion> {
     let name = path.file_name()?.to_string_lossy();
-    if is_download_item(path) {
+    if let Some(area) = user_file_area(path) {
         return Some(DirectorySuggestion {
-            reason: "file inside Downloads; move to Trash after confirmation".to_owned(),
+            reason: format!("file inside {area}; move to Trash after confirmation"),
             can_delete: true,
         });
     }
@@ -335,13 +333,17 @@ fn file_suggestion(path: &Path) -> Option<DirectorySuggestion> {
     })
 }
 
-fn is_download_item(path: &Path) -> bool {
-    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
-        return false;
-    };
-    let downloads = home.join("Downloads");
-    path.starts_with(&downloads) && path != downloads
+fn user_file_area(path: &Path) -> Option<&'static str> {
+    let home = std::env::var_os("HOME").map(PathBuf::from)?;
+    ["Downloads", "Desktop", "Documents"]
+        .into_iter()
+        .find(|area| {
+            let root = home.join(area);
+            path.starts_with(&root) && path != root
+        })
 }
+
+const STANDARD_HOME_DIRECTORIES: [&str; 3] = ["Desktop", "Documents", "Downloads"];
 
 fn excluded_root_paths(root: &Path) -> Vec<PathBuf> {
     [
@@ -379,6 +381,45 @@ fn scan_children(parent: &Path, excluded: &[PathBuf]) -> Result<(Vec<DiskScanEnt
     let inaccessible = results.iter().map(|(_, count)| count).sum();
     let entries = results.into_iter().filter_map(|(entry, _)| entry).collect();
     Ok((entries, inaccessible))
+}
+
+/// Keep the largest HOME entries while always retaining the standard user
+/// folders. A small Documents folder should remain inspectable even when the
+/// HOME directory contains more than `limit` larger caches or toolchains.
+fn scan_home_entries(home: &Path, limit: usize) -> Result<(Vec<DiskScanEntry>, usize)> {
+    let (mut entries, inaccessible) = scan_children(home, &[])?;
+    let standard_paths = STANDARD_HOME_DIRECTORIES
+        .iter()
+        .map(|name| home.join(name))
+        .filter(|path| path.is_dir())
+        .collect::<Vec<_>>();
+
+    for path in &standard_paths {
+        if entries.iter().any(|entry| entry.path == *path) {
+            continue;
+        }
+        let (size_bytes, _) = tolerant_dir_size(path);
+        entries.push(DiskScanEntry {
+            path: path.clone(),
+            size_bytes,
+            read_only: false,
+        });
+    }
+
+    entries.sort_by_key(|entry| std::cmp::Reverse(entry.size_bytes));
+    let mut selected = entries
+        .iter()
+        .filter(|entry| standard_paths.contains(&entry.path))
+        .cloned()
+        .collect::<Vec<_>>();
+    selected.extend(
+        entries
+            .into_iter()
+            .filter(|entry| !standard_paths.contains(&entry.path))
+            .take(limit),
+    );
+    selected.sort_by_key(|entry| std::cmp::Reverse(entry.size_bytes));
+    Ok((selected, inaccessible))
 }
 
 fn readonly_directory_entry(path: PathBuf) -> (DirectoryScanEntry, usize) {
@@ -448,7 +489,8 @@ fn tolerant_dir_size(path: &Path) -> (u64, usize) {
 mod tests {
     use super::{
         dir_size, directory_suggestion, file_suggestion, is_protected_path,
-        readonly_directory_entry, scan_directory, scan_readonly_paths,
+        readonly_directory_entry, scan_directory, scan_home_entries, scan_readonly_paths,
+        STANDARD_HOME_DIRECTORIES,
     };
     use std::fs;
     use std::path::Path;
@@ -581,18 +623,44 @@ mod tests {
     }
 
     #[test]
-    fn downloads_items_are_explicitly_deletable() {
+    fn user_file_area_items_are_explicitly_deletable() {
         let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
             return;
         };
-        let downloads = home.join("Downloads");
-        let file = file_suggestion(&downloads.join("old.zip")).expect("Downloads file");
-        let folder =
-            directory_suggestion(&downloads.join("old-folder"), false).expect("Downloads folder");
+        for area in ["Downloads", "Desktop", "Documents"] {
+            let root = home.join(area);
+            let file = file_suggestion(&root.join("old.zip")).expect("user-area file");
+            let folder =
+                directory_suggestion(&root.join("old-folder"), false).expect("user-area folder");
 
-        assert!(file.can_delete);
-        assert!(folder.can_delete);
-        assert!(directory_suggestion(&downloads, false).is_none());
+            assert!(file.can_delete);
+            assert!(folder.can_delete);
+            assert!(directory_suggestion(&root, false).is_none());
+        }
+    }
+
+    #[test]
+    fn home_scan_keeps_standard_directories_outside_top_limit() {
+        let root = tempdir().expect("temporary home directory");
+        for name in STANDARD_HOME_DIRECTORIES {
+            fs::create_dir(root.path().join(name)).expect("standard home directory");
+        }
+        for index in 0..4 {
+            fs::create_dir(root.path().join(format!("cache-{index}"))).expect("cache directory");
+            fs::write(
+                root.path().join(format!("cache-{index}/data.bin")),
+                vec![0_u8; 8],
+            )
+            .expect("cache data");
+        }
+
+        let (entries, inaccessible) = scan_home_entries(root.path(), 1).expect("home scan");
+        assert_eq!(inaccessible, 0);
+        for name in STANDARD_HOME_DIRECTORIES {
+            assert!(entries
+                .iter()
+                .any(|entry| entry.path == root.path().join(name)));
+        }
     }
 
     #[test]
