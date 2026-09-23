@@ -523,6 +523,9 @@ fn selected_explorer_target(app: &App) -> Option<CleanTarget> {
 }
 
 fn explorer_delete_rejection(app: &App) -> &'static str {
+    if app.directory_scan.is_none() {
+        return "Inventory only · Enter opens folder/file parent";
+    }
     let Some(scan) = app.directory_scan.as_ref() else {
         return "No explorer item selected";
     };
@@ -824,8 +827,17 @@ fn run_loop(stdout: &mut Stdout, current_version: &str) -> Result<RunOutcome> {
                             } else {
                                 app.full_disk_entries()
                                     .get(app.full_disk_cursor)
-                                    .filter(|entry| entry.path.is_dir())
-                                    .map(|entry| entry.path.clone())
+                                    .map(|entry| {
+                                        if entry.path.is_dir() {
+                                            entry.path.clone()
+                                        } else {
+                                            entry
+                                                .path
+                                                .parent()
+                                                .unwrap_or_else(|| Path::new("/"))
+                                                .to_path_buf()
+                                        }
+                                    })
                             };
                             if let Some(path) = selected_path {
                                 let current = app
@@ -1915,7 +1927,7 @@ fn render_sidebar(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
             ]));
         } else {
             lines.push(Line::from(Span::styled(
-                "Enter opens selected folder",
+                "› selects · Enter opens folder/file parent",
                 Style::default().fg(Color::Gray),
             )));
         }
@@ -2019,7 +2031,7 @@ fn render_full_disk(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let mut items = Vec::new();
     let mut selected_index = None;
     items.push(ListItem::new(
-        "Inventory — Enter opens folders; x moves only approved items to Trash",
+        "Inventory only — › selected; Enter opens folder or file parent",
     ));
 
     if app.full_disk_scanning {
@@ -2030,8 +2042,10 @@ fn render_full_disk(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         let render_entry = |entry: &cleanrs_core::DiskScanEntry| {
             let (marker, color) = if entry.read_only {
                 ("READONLY", Color::Red)
+            } else if entry.path.is_dir() {
+                ("DIR", Color::Cyan)
             } else {
-                ("REVIEW", Color::Yellow)
+                ("FILE", Color::Gray)
             };
             ListItem::new(Line::from(vec![
                 Span::styled(
@@ -2150,7 +2164,7 @@ fn render_directory(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         };
         items.push(ListItem::new(git_status));
         items.push(ListItem::new(
-            "Entries — Enter opens folders; [w] toggle delete allowlist; [x] move to Trash",
+            "› selects · Enter opens folders · [w] allowlist · [x] Trash SUGGEST items",
         ));
         let entry_start = items.len();
         if report.entries.is_empty() {
@@ -2542,7 +2556,7 @@ fn footer_lines(app: &App) -> Vec<Line<'static>> {
                             "MODE",
                             vec![
                                 Span::styled(
-                                    "Folder navigation   ",
+                                    "Folder review · › selected   ",
                                     Style::default().fg(Color::Gray),
                                 ),
                                 footer_key("Enter"),
@@ -2550,7 +2564,7 @@ fn footer_lines(app: &App) -> Vec<Line<'static>> {
                                 footer_key("w"),
                                 Span::raw(" Allowlist   "),
                                 footer_key("x"),
-                                Span::raw(" Trash"),
+                                Span::raw(" Trash SUGGEST only"),
                             ],
                         ),
                         footer_line(
@@ -2580,20 +2594,28 @@ fn footer_lines(app: &App) -> Vec<Line<'static>> {
                     footer_line(
                         "STATUS",
                         vec![Span::styled(
-                            status,
-                            Style::default().fg(if app.full_disk_scanning {
-                                Color::Yellow
-                            } else {
-                                Color::Green
-                            }),
+                            app.last_action
+                                .as_deref()
+                                .map(|action| shorten(action, 58))
+                                .unwrap_or(status),
+                            Style::default().fg(
+                                if app.last_action.is_some() || app.full_disk_scanning {
+                                    Color::Yellow
+                                } else {
+                                    Color::Green
+                                },
+                            ),
                         )],
                     ),
                     footer_line(
                         "MODE",
                         vec![
-                            Span::styled("Inventory   ", Style::default().fg(Color::Gray)),
+                            Span::styled(
+                                "Inventory only · › selected   ",
+                                Style::default().fg(Color::Gray),
+                            ),
                             footer_key("Enter"),
-                            Span::raw(" Open   "),
+                            Span::raw(" Open/parent   "),
                             footer_key("b"),
                             Span::raw(" Targets"),
                         ],
