@@ -15,7 +15,8 @@ Install the Windows binary without Rust or Homebrew from PowerShell:
 It installs a checksum-verified `cleanrs.exe` into the user profile and updates
 the user PATH. The installer supports Windows x64 and Windows ARM64 through
 the built-in x64 emulation layer, and waits for the release checksum manifest
-to become available before installing.
+to become available before installing. It is compatible with Windows PowerShell
+5.1 and PowerShell 7.
 
 ## Usage
 

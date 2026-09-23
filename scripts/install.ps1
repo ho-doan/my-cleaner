@@ -15,7 +15,10 @@ function Get-ReleaseVersion {
     }
 
     $release = Invoke-RestMethod -UseBasicParsing -Uri "https://api.github.com/repos/$Repository/releases/latest"
-    return $release.tag_name.TrimStart("v")
+    if ($null -eq $release -or [string]::IsNullOrWhiteSpace([string]$release.tag_name)) {
+        throw "GitHub did not return a latest release tag for $Repository."
+    }
+    return ([string]$release.tag_name).TrimStart("v")
 }
 
 function Invoke-DownloadWithRetry([string] $Uri, [string] $OutputFile) {
@@ -44,22 +47,37 @@ function Get-ExpectedChecksum([string] $Manifest, [string] $Archive) {
     return ([regex]::Match($line, "^[0-9a-fA-F]{64}")).Value.ToLowerInvariant()
 }
 
-$Version = Get-ReleaseVersion
-$OsArchitecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
-$Target = switch ($OsArchitecture) {
-    "X64" {
-        "x86_64-pc-windows-msvc"
-        break
+function Get-WindowsTarget {
+    $architecture = $env:PROCESSOR_ARCHITEW6432
+    if (-not $architecture) {
+        $architecture = $env:PROCESSOR_ARCHITECTURE
     }
-    "Arm64" {
-        Write-Warning "Windows ARM64 detected; installing the x86_64 build through Windows x64 emulation."
-        "x86_64-pc-windows-msvc"
-        break
+    if (-not $architecture) {
+        try {
+            $runtimeArchitecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture
+            if ($null -ne $runtimeArchitecture) {
+                $architecture = [string]$runtimeArchitecture
+            }
+        } catch {
+            $architecture = $null
+        }
     }
-    default {
-        throw "Windows installer supports x86_64 (AMD64) and ARM64 with x64 emulation; detected $OsArchitecture."
+
+    switch (([string]$architecture).ToUpperInvariant()) {
+        "AMD64" { return "x86_64-pc-windows-msvc" }
+        "X64" { return "x86_64-pc-windows-msvc" }
+        "ARM64" {
+            Write-Warning "Windows ARM64 detected; installing the x86_64 build through Windows x64 emulation."
+            return "x86_64-pc-windows-msvc"
+        }
+        default {
+            throw "Windows installer supports x86_64 (AMD64) and ARM64 with x64 emulation; detected '$architecture'."
+        }
     }
 }
+
+$Version = Get-ReleaseVersion
+$Target = Get-WindowsTarget
 
 $Archive = "cleanrs-v$Version-$Target.zip"
 $BaseUrl = "https://github.com/$Repository/releases/download/v$Version"
