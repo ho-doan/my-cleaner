@@ -100,6 +100,9 @@ pub fn all_cleaners() -> Vec<Box<dyn Cleaner>> {
         ]);
     }
 
+    #[cfg(target_os = "windows")]
+    cleaners.push(Box::new(rules::windows_system::WindowsTempCleaner));
+
     cleaners
 }
 

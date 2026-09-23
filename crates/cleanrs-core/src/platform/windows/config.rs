@@ -19,6 +19,26 @@ pub fn home_path(relative: &str) -> Option<PathBuf> {
     home_dir().map(|home| home.join(relative))
 }
 
+pub fn temporary_paths() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    for value in ["TEMP", "TMP"] {
+        if let Some(path) = std::env::var_os(value).map(PathBuf::from) {
+            if !paths.contains(&path) {
+                paths.push(path);
+            }
+        }
+    }
+    if let Some(path) = std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .map(|path| path.join("Temp"))
+    {
+        if !paths.contains(&path) {
+            paths.push(path);
+        }
+    }
+    paths
+}
+
 pub fn default_scan_root() -> PathBuf {
     std::env::var_os("SystemDrive")
         .map(PathBuf::from)

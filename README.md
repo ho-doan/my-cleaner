@@ -10,6 +10,15 @@ boundaries. The current public release remains macOS-only; Windows support is
 being built on the shared scanner, TUI, and cleanup model before a Windows
 installer is published.
 
+The Windows installer is prepared for the next Windows release. On a supported
+release, install without Rust or Homebrew from PowerShell:
+
+    irm https://raw.githubusercontent.com/ho-doan/my-cleaner/master/scripts/install.ps1 | iex
+
+It installs a checksum-verified `cleanrs.exe` into the user profile and updates
+the user PATH. The current public release does not contain a Windows artifact
+yet.
+
 ## Usage
 
     cargo run -p cleanrs -- list

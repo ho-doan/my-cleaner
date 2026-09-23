@@ -7,8 +7,15 @@ use std::thread::sleep;
 use std::time::Duration;
 
 const RELEASES_API: &str = "https://api.github.com/repos/ho-doan/my-cleaner/releases/latest";
+#[cfg(target_os = "windows")]
+const INSTALL_SCRIPT: &str =
+    "https://raw.githubusercontent.com/ho-doan/my-cleaner/master/scripts/install.ps1";
+#[cfg(not(target_os = "windows"))]
 const INSTALL_SCRIPT: &str =
     "https://raw.githubusercontent.com/ho-doan/my-cleaner/master/scripts/install.sh";
+#[cfg(target_os = "windows")]
+const RELEASE_CHECKSUMS: &str =
+    "https://github.com/ho-doan/my-cleaner/releases/download/v{version}/checksums.txt";
 const BREW_FORMULA: &str = "ho-doan/my-cleaner/cleanrs";
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -26,31 +33,9 @@ struct GithubRelease {
 
 /// Check GitHub's latest release and expose it only after the installer CDN is ready.
 pub fn check_latest_release(current_version: &str) -> Result<Option<UpdateInfo>> {
-    let output = Command::new("curl")
-        .args([
-            "--fail",
-            "--silent",
-            "--show-error",
-            "--location",
-            "--max-time",
-            "5",
-            "--proto",
-            "=https",
-            "--tlsv1.2",
-            "-H",
-            "Accept: application/vnd.github+json",
-            "-H",
-            "User-Agent: cleanrs-version-check",
-            RELEASES_API,
-        ])
-        .output()
-        .context("start update check with curl")?;
-    if !output.status.success() {
-        anyhow::bail!("GitHub update check failed with status {}", output.status);
-    }
-
     let release: GithubRelease =
-        serde_json::from_slice(&output.stdout).context("parse GitHub latest release")?;
+        serde_json::from_str(&fetch_url(RELEASES_API).context("fetch GitHub latest release")?)
+            .context("parse GitHub latest release")?;
     let latest_version = normalize_version(&release.tag_name)
         .context("GitHub latest release has an invalid version tag")?;
     let current_version =
@@ -104,17 +89,20 @@ fn wait_for_installer_script(version: &str) -> Result<String> {
     let target = current_release_target()?;
     for attempt in 1..=INSTALLER_READY_ATTEMPTS {
         match fetch_installer_script(version, attempt) {
-            Ok(script) if installer_script_has_checksum(&script, version, target) => {
-                if attempt > 1 {
-                    eprintln!("Installer CDN is ready for cleanrs {version}.");
+            Ok(script) => match installer_is_ready(version, &script, target, attempt) {
+                Ok(true) => {
+                    if attempt > 1 {
+                        eprintln!("Installer CDN is ready for cleanrs {version}.");
+                    }
+                    return Ok(script);
                 }
-                return Ok(script);
-            }
-            Ok(_) => {
-                eprintln!(
+                Ok(false) => eprintln!(
                     "Waiting for installer CDN to publish the cleanrs {version} checksum ({attempt}/{INSTALLER_READY_ATTEMPTS})…"
-                );
-            }
+                ),
+                Err(error) => eprintln!(
+                    "Installer CDN checksum check is not ready ({attempt}/{INSTALLER_READY_ATTEMPTS}): {error}"
+                ),
+            },
             Err(error) => {
                 eprintln!(
                     "Installer CDN is not ready ({attempt}/{INSTALLER_READY_ATTEMPTS}): {error}"
@@ -135,6 +123,37 @@ fn wait_for_installer_script(version: &str) -> Result<String> {
 
 fn fetch_installer_script(version: &str, attempt: usize) -> Result<String> {
     let cache_busted_url = format!("{INSTALL_SCRIPT}?version={version}&attempt={attempt}");
+    fetch_url(&cache_busted_url).context("fetch installer CDN script")
+}
+
+#[cfg(target_os = "windows")]
+fn fetch_url(url: &str) -> Result<String> {
+    let escaped_url = url.replace('\'', "''");
+    let command = format!(
+        "$ProgressPreference='SilentlyContinue'; (Invoke-WebRequest -UseBasicParsing -Headers @{{'Cache-Control'='no-cache'; Pragma='no-cache'}} -Uri '{escaped_url}').Content"
+    );
+    let output = Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            command.as_str(),
+        ])
+        .output()
+        .context("start PowerShell network request")?;
+    if !output.status.success() {
+        bail!(
+            "PowerShell network request exited with status {}",
+            output.status
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn fetch_url(url: &str) -> Result<String> {
     let output = Command::new("curl")
         .args([
             "--fail",
@@ -152,17 +171,22 @@ fn fetch_installer_script(version: &str, attempt: usize) -> Result<String> {
             "Cache-Control: no-cache",
             "-H",
             "Pragma: no-cache",
-            cache_busted_url.as_str(),
+            url,
         ])
         .output()
-        .context("start installer CDN check")?;
+        .context("start curl network request")?;
     if !output.status.success() {
-        bail!("installer CDN request exited with status {}", output.status);
+        bail!("curl network request exited with status {}", output.status);
     }
-    String::from_utf8(output.stdout).context("installer CDN returned non-UTF-8 script")
+    String::from_utf8(output.stdout).context("network response was not UTF-8")
 }
 
 fn current_release_target() -> Result<&'static str> {
+    current_release_target_for_platform()
+}
+
+#[cfg(target_os = "macos")]
+fn current_release_target_for_platform() -> Result<&'static str> {
     match std::env::consts::ARCH {
         "aarch64" => Ok("aarch64-apple-darwin"),
         "x86_64" => Ok("x86_64-apple-darwin"),
@@ -170,6 +194,64 @@ fn current_release_target() -> Result<&'static str> {
     }
 }
 
+#[cfg(target_os = "windows")]
+fn current_release_target_for_platform() -> Result<&'static str> {
+    match std::env::consts::ARCH {
+        "x86_64" => Ok("x86_64-pc-windows-msvc"),
+        architecture => bail!("unsupported Windows architecture for upgrade: {architecture}"),
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn current_release_target_for_platform() -> Result<&'static str> {
+    bail!("unsupported platform for upgrade")
+}
+
+fn installer_is_ready(version: &str, script: &str, target: &str, attempt: usize) -> Result<bool> {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = attempt;
+        Ok(installer_script_has_checksum(script, version, target))
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let _ = script;
+        let archive = format!("cleanrs-v{version}-{target}.zip");
+        let manifest_url = format!(
+            "{}?version={version}&attempt={attempt}",
+            RELEASE_CHECKSUMS.replace("{version}", version)
+        );
+        let manifest = fetch_url(&manifest_url)?;
+        Ok(checksum_manifest_has_archive(&manifest, &archive))
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let _ = (version, script, target, attempt);
+        Ok(false)
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn checksum_manifest_has_archive(manifest: &str, archive: &str) -> bool {
+    manifest.lines().any(|line| {
+        let mut parts = line.split_whitespace();
+        let Some(checksum) = parts.next() else {
+            return false;
+        };
+        let Some(name) = parts.next_back() else {
+            return false;
+        };
+        checksum.len() == 64
+            && checksum
+                .chars()
+                .all(|character| character.is_ascii_hexdigit())
+            && name.trim_start_matches('*') == archive
+    })
+}
+
+#[cfg(target_os = "macos")]
 fn installer_script_has_checksum(script: &str, version: &str, target: &str) -> bool {
     let case_entry = format!("{version}:{target})");
     let mut lines = script.lines();
@@ -183,6 +265,7 @@ fn installer_script_has_checksum(script: &str, version: &str, target: &str) -> b
     false
 }
 
+#[cfg(target_os = "macos")]
 fn run_installer_script(script: &str, version: &str, install_dir: &Path) -> Result<()> {
     let mut child = Command::new("sh")
         .arg("-s")
@@ -204,6 +287,44 @@ fn run_installer_script(script: &str, version: &str, install_dir: &Path) -> Resu
     let status = child.wait().context("wait for curl installer")?;
     if !status.success() {
         bail!("curl installer exited with status {status}");
+    }
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn run_installer_script(_script: &str, _version: &str, _install_dir: &Path) -> Result<()> {
+    bail!("automatic upgrade is not supported on this platform")
+}
+
+#[cfg(target_os = "windows")]
+fn run_installer_script(script: &str, version: &str, install_dir: &Path) -> Result<()> {
+    let mut child = Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            "-",
+        ])
+        .stdin(Stdio::piped())
+        .env("CLEANRS_VERSION", version)
+        .env("CLEANRS_INSTALL_DIR", install_dir)
+        .spawn()
+        .context("start verified PowerShell installer")?;
+
+    let mut stdin = child
+        .stdin
+        .take()
+        .context("open stdin for verified PowerShell installer")?;
+    stdin
+        .write_all(script.as_bytes())
+        .context("send verified PowerShell installer")?;
+    drop(stdin);
+
+    let status = child.wait().context("wait for PowerShell installer")?;
+    if !status.success() {
+        bail!("PowerShell installer exited with status {status}");
     }
     Ok(())
 }
@@ -262,8 +383,11 @@ fn compare_versions(left: &str, right: &str) -> std::cmp::Ordering {
 
 #[cfg(test)]
 mod tests {
-    use super::{compare_versions, installer_script_has_checksum, normalize_version};
+    use super::{checksum_manifest_has_archive, compare_versions, normalize_version};
     use std::cmp::Ordering;
+
+    #[cfg(target_os = "macos")]
+    use super::installer_script_has_checksum;
 
     #[test]
     fn normalizes_release_versions() {
@@ -279,6 +403,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn installer_readiness_requires_a_non_empty_target_checksum() {
         let script = r#"
             0.1.5:aarch64-apple-darwin)
@@ -301,6 +426,19 @@ mod tests {
             script,
             "0.1.6",
             "aarch64-apple-darwin"
+        ));
+    }
+
+    #[test]
+    fn checksum_manifest_requires_a_verified_archive_entry() {
+        let manifest = "abc\n1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef  cleanrs-v0.1.6-x86_64-pc-windows-msvc.zip\n";
+        assert!(checksum_manifest_has_archive(
+            manifest,
+            "cleanrs-v0.1.6-x86_64-pc-windows-msvc.zip"
+        ));
+        assert!(!checksum_manifest_has_archive(
+            manifest,
+            "cleanrs-v0.1.6-aarch64-pc-windows-msvc.zip"
         ));
     }
 }

@@ -19,6 +19,8 @@ jobs:
             target: aarch64-apple-darwin
           - runner: macos-14
             target: x86_64-apple-darwin
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
 
     steps:
       - uses: actions/checkout@v4
@@ -28,16 +30,28 @@ jobs:
         with:
           targets: "${{ matrix.target }}"
       - run: cargo build --release --locked -p cleanrs --target "${{ matrix.target }}"
-      - name: Package binary
+      - name: Package Unix binary
+        if: runner.os != 'Windows'
+        shell: bash
         run: |
           staging="cleanrs-${GITHUB_REF_NAME}-${{ matrix.target }}"
           mkdir -p "$staging"
           cp "target/${{ matrix.target }}/release/cleanrs" "$staging/cleanrs"
           tar -czf "${staging}.tar.gz" -C "$staging" cleanrs
+      - name: Package Windows binary
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $staging = "cleanrs-${env:GITHUB_REF_NAME}-${{ matrix.target }}"
+          New-Item -ItemType Directory -Path $staging -Force | Out-Null
+          Copy-Item "target\${{ matrix.target }}\release\cleanrs.exe" "$staging\cleanrs.exe"
+          Compress-Archive -Path "$staging\cleanrs.exe" -DestinationPath "$staging.zip" -Force
       - uses: actions/upload-artifact@v4
         with:
           name: "cleanrs-${{ matrix.target }}"
-          path: "cleanrs-${{ github.ref_name }}-${{ matrix.target }}.tar.gz"
+          path: |
+            cleanrs-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
+            cleanrs-${{ github.ref_name }}-${{ matrix.target }}.zip
 
   publish:
     name: Publish GitHub release
@@ -48,6 +62,14 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+      - name: Generate release checksums
+        shell: bash
+        run: |
+          cd dist
+          sha256sum cleanrs-*.tar.gz cleanrs-*.zip > checksums.txt
       - uses: softprops/action-gh-release@v2
         with:
-          files: "dist/cleanrs-*.tar.gz"
+          files: |
+            dist/cleanrs-*.tar.gz
+            dist/cleanrs-*.zip
+            dist/checksums.txt

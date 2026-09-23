@@ -27,6 +27,8 @@ pub mod simulator;
 #[cfg(target_os = "macos")]
 pub mod trash;
 pub mod uv;
+#[cfg(target_os = "windows")]
+pub mod windows_system;
 #[cfg(target_os = "macos")]
 pub mod xcode;
 pub mod yarn;
