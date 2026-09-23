@@ -14,6 +14,7 @@ pub mod platform;
 pub mod report;
 pub mod rules;
 pub mod scanner;
+pub mod standalone;
 pub mod update;
 
 pub use allowlist::{load_delete_allowlist, toggle_delete_allowlist};
@@ -28,5 +29,9 @@ pub use report::{all_reporters, scan_all_reports, ReadOnlyScan, ReadOnlyTarget, 
 pub use scanner::{
     can_delete_path, dir_size, full_disk_scan, is_protected_path, scan_directory, DirectoryScan,
     DirectoryScanEntry, DirectorySuggestion, DiskScanEntry, FullDiskScan,
+};
+pub use standalone::{
+    remove_standalone_tool, scan_standalone_tools, StandaloneTool, StandaloneToolResult,
+    StandaloneToolScan,
 };
 pub use update::{check_latest_release, perform_upgrade, UpdateInfo};

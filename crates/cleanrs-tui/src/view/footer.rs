@@ -77,6 +77,52 @@ pub(crate) fn footer_lines(app: &App) -> Vec<Line<'static>> {
                     ),
                 ];
             }
+            if app.show_standalone_tools {
+                let status = if app.standalone_tools_scanning {
+                    "Standalone installs · scanning user binary roots".to_owned()
+                } else if let Some(report) = &app.standalone_tools {
+                    format!(
+                        "Standalone installs · {} found · {} root warning(s)",
+                        report.tools.len(),
+                        report.errors.len()
+                    )
+                } else {
+                    "Standalone installs · not scanned".to_owned()
+                };
+                return vec![
+                    footer_line(
+                        "STATUS",
+                        vec![Span::styled(
+                            shorten(&status, 58),
+                            Style::default().fg(if app.standalone_tools_scanning {
+                                Color::Yellow
+                            } else {
+                                Color::Green
+                            }),
+                        )],
+                    ),
+                    footer_line(
+                        "MODE",
+                        vec![Span::styled(
+                            "Exact file only · recoverable via Trash",
+                            Style::default().fg(Color::Gray),
+                        )],
+                    ),
+                    footer_line(
+                        "KEYS",
+                        vec![
+                            footer_key("↑↓"),
+                            Span::raw(" Move   "),
+                            footer_key("x/Enter"),
+                            Span::raw(" Remove   "),
+                            footer_key("r"),
+                            Span::raw(" Reload   "),
+                            footer_key("b"),
+                            Span::raw(" Back"),
+                        ],
+                    ),
+                ];
+            }
             if app.show_full_disk {
                 if app.directory_scanning {
                     return vec![
@@ -232,6 +278,10 @@ pub(crate) fn footer_lines(app: &App) -> Vec<Line<'static>> {
                 Span::raw(" Reload "),
                 footer_key("f"),
                 Span::raw(" Full "),
+                footer_key("g"),
+                Span::raw(" Globals "),
+                footer_key("s"),
+                Span::raw(" Standalone "),
             ];
             if app.available_update().is_some() {
                 keys.push(footer_key("u"));
@@ -336,6 +386,32 @@ pub(crate) fn footer_lines(app: &App) -> Vec<Line<'static>> {
                         vec![
                             footer_key("y"),
                             Span::raw(" Run   "),
+                            footer_key("n/Esc"),
+                            Span::raw(" Cancel"),
+                        ],
+                    ),
+                ]
+            } else if let Some(tool) = &app.pending_standalone_uninstall {
+                vec![
+                    footer_line(
+                        "STATUS",
+                        vec![Span::styled(
+                            format!("Remove standalone binary · {}", tool.name),
+                            Style::default().fg(Color::Red),
+                        )],
+                    ),
+                    footer_line(
+                        "MODE",
+                        vec![Span::styled(
+                            "Only this exact file/symlink will move to Trash",
+                            Style::default().fg(Color::Gray),
+                        )],
+                    ),
+                    footer_line(
+                        "KEYS",
+                        vec![
+                            footer_key("y"),
+                            Span::raw(" Move to Trash   "),
                             footer_key("n/Esc"),
                             Span::raw(" Cancel"),
                         ],

@@ -3,7 +3,7 @@
 use cleanrs_core::{
     Category, CleanResult, CleanTarget, CleanerScan, DirectoryScan, DirectoryScanEntry,
     FullDiskScan, GlobalTool, GlobalToolResult, GlobalToolScan, ReadOnlyScan, RiskLevel,
-    UpdateInfo,
+    StandaloneTool, StandaloneToolResult, StandaloneToolScan, UpdateInfo,
 };
 use crossbeam_channel::Receiver;
 use fs2::{available_space, total_space};
@@ -93,6 +93,15 @@ pub(crate) struct App {
     pub(crate) pending_global_uninstall: Option<GlobalTool>,
     pub(crate) global_uninstall_receiver: Option<Receiver<Result<GlobalToolResult, String>>>,
     pub(crate) global_uninstalling: bool,
+    pub(crate) show_standalone_tools: bool,
+    pub(crate) standalone_tools: Option<StandaloneToolScan>,
+    pub(crate) standalone_tools_scanning: bool,
+    pub(crate) standalone_tools_error: Option<String>,
+    pub(crate) standalone_cursor: usize,
+    pub(crate) pending_standalone_uninstall: Option<StandaloneTool>,
+    pub(crate) standalone_uninstall_receiver:
+        Option<Receiver<Result<StandaloneToolResult, String>>>,
+    pub(crate) standalone_uninstalling: bool,
     pub(crate) directory_scan: Option<DirectoryScan>,
     pub(crate) directory_scanning: bool,
     pub(crate) directory_error: Option<String>,
@@ -146,6 +155,14 @@ impl App {
             pending_global_uninstall: None,
             global_uninstall_receiver: None,
             global_uninstalling: false,
+            show_standalone_tools: false,
+            standalone_tools: None,
+            standalone_tools_scanning: false,
+            standalone_tools_error: None,
+            standalone_cursor: 0,
+            pending_standalone_uninstall: None,
+            standalone_uninstall_receiver: None,
+            standalone_uninstalling: false,
             directory_scan: None,
             directory_scanning: false,
             directory_error: None,
@@ -189,6 +206,14 @@ impl App {
         self.pending_global_uninstall = None;
         self.global_uninstall_receiver = None;
         self.global_uninstalling = false;
+        self.show_standalone_tools = false;
+        self.standalone_tools = None;
+        self.standalone_tools_scanning = false;
+        self.standalone_tools_error = None;
+        self.standalone_cursor = 0;
+        self.pending_standalone_uninstall = None;
+        self.standalone_uninstall_receiver = None;
+        self.standalone_uninstalling = false;
         self.directory_scan = None;
         self.directory_scanning = false;
         self.directory_error = None;
@@ -335,6 +360,27 @@ impl App {
                 .saturating_sub(delta.unsigned_abs() as usize)
         } else {
             (self.global_cursor + delta as usize).min(max)
+        };
+    }
+
+    pub(crate) fn standalone_tools(&self) -> &[StandaloneTool] {
+        self.standalone_tools
+            .as_ref()
+            .map(|scan| scan.tools.as_slice())
+            .unwrap_or(&[])
+    }
+
+    pub(crate) fn move_standalone_cursor(&mut self, delta: i32) {
+        let len = self.standalone_tools().len();
+        if len == 0 {
+            return;
+        }
+        let max = len - 1;
+        self.standalone_cursor = if delta.is_negative() {
+            self.standalone_cursor
+                .saturating_sub(delta.unsigned_abs() as usize)
+        } else {
+            (self.standalone_cursor + delta as usize).min(max)
         };
     }
 

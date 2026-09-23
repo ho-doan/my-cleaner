@@ -5,6 +5,7 @@ mod footer;
 mod global;
 mod modals;
 mod sidebar;
+mod standalone;
 mod targets;
 
 pub(crate) use explorer::{render_directory, render_full_disk};
@@ -12,6 +13,7 @@ pub(crate) use footer::footer_lines;
 pub(crate) use global::render_global_tools;
 pub(crate) use modals::{render_confirmation_modal, render_info_modal};
 pub(crate) use sidebar::render_sidebar;
+pub(crate) use standalone::render_standalone_tools;
 pub(crate) use targets::render_targets;
 
 use humansize::{format_size, DECIMAL};
@@ -41,6 +43,9 @@ pub(crate) fn render(frame: &mut Frame, app: &App) {
             app.received_scans, app.expected_scans
         ),
         Mode::Reviewing if app.show_global_tools => " cleanrs — global tools ".to_owned(),
+        Mode::Reviewing if app.show_standalone_tools => {
+            " cleanrs — standalone installs ".to_owned()
+        }
         Mode::Reviewing if app.show_full_disk => " cleanrs — full-disk explorer ".to_owned(),
         Mode::Reviewing => " cleanrs — review targets ".to_owned(),
         Mode::Confirming => " cleanrs — confirm ".to_owned(),
@@ -131,6 +136,8 @@ pub(crate) fn render(frame: &mut Frame, app: &App) {
     render_sidebar(frame, app, body[0]);
     if app.show_global_tools {
         render_global_tools(frame, app, body[1]);
+    } else if app.show_standalone_tools {
+        render_standalone_tools(frame, app, body[1]);
     } else if app.show_full_disk {
         if app.directory_scan.is_some() || app.directory_scanning || app.directory_error.is_some() {
             render_directory(frame, app, body[1]);

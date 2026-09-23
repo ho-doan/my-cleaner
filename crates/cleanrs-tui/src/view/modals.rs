@@ -15,7 +15,8 @@ pub(crate) fn render_confirmation_modal(frame: &mut Frame, app: &App) {
     let area = centered_rect(78, 48, frame.area());
     let destructive = app.pending_empty_trash
         || app.pending_explorer_delete.is_some()
-        || app.pending_global_uninstall.is_some();
+        || app.pending_global_uninstall.is_some()
+        || app.pending_standalone_uninstall.is_some();
     let border_color = if destructive {
         Color::Red
     } else {
@@ -77,6 +78,28 @@ pub(crate) fn render_confirmation_modal(frame: &mut Frame, app: &App) {
             "Check dependencies first; Homebrew may remove linked dependents.",
         ));
         lines.push(Line::from("Press [y] to execute or [n]/[esc] to cancel."));
+    } else if let Some(tool) = &app.pending_standalone_uninstall {
+        lines.push(Line::from(Span::styled(
+            "Remove standalone binary",
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(format!(
+            "{} · {}",
+            tool.name,
+            tool.path.display()
+        )));
+        lines.push(Line::from(format!(
+            "Estimated size: {}",
+            format_size(tool.size_bytes, DECIMAL)
+        )));
+        lines.push(Line::from(""));
+        lines.push(Line::from(
+            "Only this exact file or symlink will move to Trash.",
+        ));
+        lines.push(Line::from(
+            "The scan cannot prove installer provenance; review the path before continuing.",
+        ));
+        lines.push(Line::from("Press [y] to confirm or [n]/[esc] to cancel."));
     } else if let Some(target) = &app.pending_explorer_delete {
         let item_kind = if target.path.is_dir() {
             "folder and all contents"

@@ -120,6 +120,31 @@ pub(crate) fn render_sidebar(frame: &mut Frame, app: &App, area: ratatui::layout
     }
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
+        "STANDALONE",
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )));
+    if app.standalone_tools_scanning {
+        lines.push(Line::from(Span::styled(
+            "Scanning user bins…",
+            Style::default().fg(Color::Yellow),
+        )));
+    } else if let Some(report) = &app.standalone_tools {
+        let removable = report.tools.iter().filter(|tool| tool.can_remove).count();
+        lines.push(Line::from(format!("Found: {}", report.tools.len())));
+        lines.push(Line::from(format!("Removable: {removable}")));
+        if !report.errors.is_empty() {
+            lines.push(Line::from(Span::styled(
+                format!("Root warnings: {}", report.errors.len()),
+                Style::default().fg(Color::Yellow),
+            )));
+        }
+    } else {
+        lines.push(Line::from("Press [s] to inspect"));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
         "STORAGE",
         Style::default()
             .fg(Color::Cyan)

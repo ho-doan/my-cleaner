@@ -5,7 +5,7 @@ use cleanrs_core::{
     all_cleaners, check_latest_release, default_scan_root, full_disk_scan, scan_all_reports,
     scan_cleaner, scan_directory, scan_global_tools, toggle_delete_allowlist,
     uninstall_global_tool, CleanMethod, CleanTarget, CleanerScan, DirectoryScan, FullDiskScan,
-    GlobalTool, GlobalToolScan, ReadOnlyScan, UpdateInfo,
+    GlobalTool, GlobalToolScan, ReadOnlyScan, StandaloneTool, StandaloneToolScan, UpdateInfo,
 };
 use crossbeam_channel::{unbounded, Receiver, TryRecvError};
 use crossterm::event::{self, Event, KeyEventKind};
@@ -69,6 +69,15 @@ fn start_global_scan() -> Receiver<Result<GlobalToolScan, String>> {
     let (sender, receiver) = unbounded();
     rayon::spawn(move || {
         let report = scan_global_tools();
+        let _ = sender.send(Ok(report));
+    });
+    receiver
+}
+
+fn start_standalone_scan() -> Receiver<Result<StandaloneToolScan, String>> {
+    let (sender, receiver) = unbounded();
+    rayon::spawn(move || {
+        let report = cleanrs_core::scan_standalone_tools();
         let _ = sender.send(Ok(report));
     });
     receiver
@@ -164,6 +173,10 @@ fn selected_global_tool(app: &App) -> Option<GlobalTool> {
     app.global_tools().get(app.global_cursor).cloned()
 }
 
+fn selected_standalone_tool(app: &App) -> Option<StandaloneTool> {
+    app.standalone_tools().get(app.standalone_cursor).cloned()
+}
+
 pub(crate) fn start_explorer_delete(app: &mut App) {
     let Some(target) = app.pending_explorer_delete.take() else {
         app.mode = Mode::Reviewing;
@@ -209,6 +222,31 @@ pub(crate) fn start_global_uninstall(app: &mut App) {
 
     rayon::spawn(move || {
         let result = uninstall_global_tool(&tool, false).map_err(|error| format!("{error:#}"));
+        let _ = sender.send(result);
+    });
+}
+
+pub(crate) fn start_standalone_uninstall(app: &mut App) {
+    let Some(tool) = app.pending_standalone_uninstall.take() else {
+        app.mode = Mode::Reviewing;
+        return;
+    };
+    let (sender, receiver) = unbounded();
+    app.mode = Mode::Cleaning;
+    app.standalone_uninstalling = true;
+    app.cleaning_completed = 0;
+    app.cleaning_total = 1;
+    app.cleaning_disk_before = app.disk.or_else(read_disk_usage);
+    app.cleaning_started_at = Some(Instant::now());
+    app.active_cleaner = Some("standalone".to_owned());
+    app.active_target = Some(tool.path.display().to_string());
+    app.active_target_size = tool.size_bytes;
+    app.active_detail = Some("moving standalone binary to Trash".to_owned());
+    app.standalone_uninstall_receiver = Some(receiver);
+
+    rayon::spawn(move || {
+        let result = cleanrs_core::remove_standalone_tool(&tool, false)
+            .map_err(|error| format!("{error:#}"));
         let _ = sender.send(result);
     });
 }
@@ -280,6 +318,7 @@ pub(crate) fn run_loop(stdout: &mut Stdout, current_version: &str) -> Result<Run
     let mut update_receiver = Some(start_update_check(current_version.to_owned()));
     let mut full_disk_receiver: Option<Receiver<Result<FullDiskScan, String>>> = None;
     let mut global_scan_receiver: Option<Receiver<Result<GlobalToolScan, String>>> = None;
+    let mut standalone_scan_receiver: Option<Receiver<Result<StandaloneToolScan, String>>> = None;
     let mut directory_receiver: Option<Receiver<Result<DirectoryScan, String>>> = None;
 
     let backend = CrosstermBackend::new(stdout);
@@ -291,9 +330,11 @@ pub(crate) fn run_loop(stdout: &mut Stdout, current_version: &str) -> Result<Run
         receive_update_check(&mut app, &mut update_receiver);
         receive_full_disk_scan(&mut app, &mut full_disk_receiver);
         receive_global_scan(&mut app, &mut global_scan_receiver);
+        receive_standalone_scan(&mut app, &mut standalone_scan_receiver);
         receive_directory_scan(&mut app, &mut directory_receiver);
         receive_explorer_delete(&mut app, &mut directory_receiver);
         receive_global_uninstall(&mut app, &mut global_scan_receiver);
+        receive_standalone_uninstall(&mut app, &mut standalone_scan_receiver);
         if receive_cleaning(&mut app) {
             let (expected, next_receiver, next_readonly_receiver) = start_scan();
             app.reset_for_scan(expected);
@@ -332,6 +373,10 @@ pub(crate) fn run_loop(stdout: &mut Stdout, current_version: &str) -> Result<Run
                         KeyAction::BackGlobalTools => {
                             app.show_global_tools = false;
                             app.global_cursor = 0;
+                        }
+                        KeyAction::BackStandaloneTools => {
+                            app.show_standalone_tools = false;
+                            app.standalone_cursor = 0;
                         }
                         KeyAction::Quit => break Ok(RunOutcome::Exit),
                         KeyAction::Upgrade => {
@@ -386,6 +431,7 @@ pub(crate) fn run_loop(stdout: &mut Stdout, current_version: &str) -> Result<Run
                                 app.full_disk_error = None;
                                 app.show_full_disk = true;
                                 app.show_global_tools = false;
+                                app.show_standalone_tools = false;
                                 app.full_disk_cursor = 0;
                                 app.directory_scan = None;
                                 app.directory_scanning = false;
@@ -398,6 +444,7 @@ pub(crate) fn run_loop(stdout: &mut Stdout, current_version: &str) -> Result<Run
                         }
                         KeyAction::GlobalTools => {
                             app.show_global_tools = true;
+                            app.show_standalone_tools = false;
                             app.show_full_disk = false;
                             app.directory_scan = None;
                             app.directory_scanning = false;
@@ -409,6 +456,20 @@ pub(crate) fn run_loop(stdout: &mut Stdout, current_version: &str) -> Result<Run
                                 global_scan_receiver = Some(start_global_scan());
                             }
                         }
+                        KeyAction::StandaloneTools => {
+                            app.show_standalone_tools = true;
+                            app.show_global_tools = false;
+                            app.show_full_disk = false;
+                            app.directory_scan = None;
+                            app.directory_scanning = false;
+                            app.directory_error = None;
+                            if !app.standalone_tools_scanning {
+                                app.standalone_tools_scanning = true;
+                                app.standalone_tools_error = None;
+                                app.standalone_cursor = 0;
+                                standalone_scan_receiver = Some(start_standalone_scan());
+                            }
+                        }
                         KeyAction::UninstallGlobal => {
                             if let Some(tool) = selected_global_tool(&app) {
                                 if tool.can_uninstall {
@@ -418,6 +479,20 @@ pub(crate) fn run_loop(stdout: &mut Stdout, current_version: &str) -> Result<Run
                                 } else {
                                     app.last_action = Some(tool.warning.unwrap_or_else(|| {
                                         "This global tool is protected from uninstall".to_owned()
+                                    }));
+                                }
+                            }
+                        }
+                        KeyAction::UninstallStandalone => {
+                            if let Some(tool) = selected_standalone_tool(&app) {
+                                if tool.can_remove {
+                                    app.pending_standalone_uninstall = Some(tool);
+                                    app.confirm_text.clear();
+                                    app.mode = Mode::Confirming;
+                                } else {
+                                    app.last_action = Some(tool.warning.unwrap_or_else(|| {
+                                        "This standalone binary is protected from removal"
+                                            .to_owned()
                                     }));
                                 }
                             }
@@ -578,6 +653,34 @@ fn receive_global_scan(
     }
 }
 
+fn receive_standalone_scan(
+    app: &mut App,
+    receiver: &mut Option<Receiver<Result<StandaloneToolScan, String>>>,
+) {
+    let message = receiver.as_ref().map(|channel| channel.try_recv());
+    match message {
+        Some(Ok(Ok(report))) => {
+            app.standalone_tools = Some(report);
+            app.standalone_tools_scanning = false;
+            app.standalone_tools_error = None;
+            app.standalone_cursor = 0;
+            *receiver = None;
+        }
+        Some(Ok(Err(error))) => {
+            app.standalone_tools_scanning = false;
+            app.standalone_tools_error = Some(error);
+            *receiver = None;
+        }
+        Some(Err(TryRecvError::Disconnected)) => {
+            app.standalone_tools_scanning = false;
+            app.standalone_tools_error =
+                Some("standalone tools scan stopped unexpectedly".to_owned());
+            *receiver = None;
+        }
+        Some(Err(TryRecvError::Empty)) | None => {}
+    }
+}
+
 fn receive_directory_scan(
     app: &mut App,
     receiver: &mut Option<Receiver<Result<DirectoryScan, String>>>,
@@ -706,6 +809,59 @@ fn receive_global_uninstall(
             app.cleaning_disk_before = None;
             app.mode = Mode::Reviewing;
             app.last_action = Some("Global uninstall worker stopped unexpectedly".to_owned());
+        }
+    }
+}
+
+fn receive_standalone_uninstall(
+    app: &mut App,
+    standalone_scan_receiver: &mut Option<Receiver<Result<StandaloneToolScan, String>>>,
+) {
+    let Some(receiver) = app.standalone_uninstall_receiver.take() else {
+        return;
+    };
+
+    match receiver.try_recv() {
+        Ok(outcome) => {
+            app.standalone_uninstalling = false;
+            app.cleaning_completed = 1;
+            app.cleaning_started_at = None;
+            app.active_cleaner = None;
+            app.active_target = None;
+            app.active_target_size = 0;
+            app.active_detail = None;
+            app.disk = read_disk_usage().or(app.disk);
+            app.cleaning_disk_before = None;
+            match outcome {
+                Ok(result) => {
+                    app.last_action = Some(format!(
+                        "Removed {} · rescanning standalone tools",
+                        result.name
+                    ));
+                    app.standalone_tools_scanning = true;
+                    app.standalone_tools_error = None;
+                    app.standalone_cursor = 0;
+                    *standalone_scan_receiver = Some(start_standalone_scan());
+                }
+                Err(error) => {
+                    app.last_action = Some(format!("Standalone removal failed: {error}"));
+                }
+            }
+            app.mode = Mode::Reviewing;
+        }
+        Err(TryRecvError::Empty) => {
+            app.standalone_uninstall_receiver = Some(receiver);
+        }
+        Err(TryRecvError::Disconnected) => {
+            app.standalone_uninstalling = false;
+            app.cleaning_started_at = None;
+            app.active_cleaner = None;
+            app.active_target = None;
+            app.active_target_size = 0;
+            app.active_detail = None;
+            app.cleaning_disk_before = None;
+            app.mode = Mode::Reviewing;
+            app.last_action = Some("Standalone removal worker stopped unexpectedly".to_owned());
         }
     }
 }

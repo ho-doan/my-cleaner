@@ -5,21 +5,26 @@ use humansize::{format_size, DECIMAL};
 
 use super::{
     model::{App, Mode},
-    runtime::{start_cleaning, start_explorer_delete, start_global_uninstall},
+    runtime::{
+        start_cleaning, start_explorer_delete, start_global_uninstall, start_standalone_uninstall,
+    },
 };
 
 pub(crate) enum KeyAction {
     ToggleAllowlist,
     BackDirectory,
     BackGlobalTools,
+    BackStandaloneTools,
     Continue,
     DeleteFile,
     FullDisk,
     GlobalTools,
+    StandaloneTools,
     OpenDirectory,
     Quit,
     Rescan,
     UninstallGlobal,
+    UninstallStandalone,
     Upgrade,
 }
 
@@ -58,7 +63,29 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) -> KeyAction {
                         KeyCode::Up | KeyCode::Char('k') => app.move_global_cursor(-1),
                         KeyCode::Enter | KeyCode::Char('x') => return KeyAction::UninstallGlobal,
                         KeyCode::Char('r') => return KeyAction::GlobalTools,
+                        KeyCode::Char('s') => return KeyAction::StandaloneTools,
                         KeyCode::Char('b') => return KeyAction::BackGlobalTools,
+                        KeyCode::Char('f') => return KeyAction::FullDisk,
+                        _ => {}
+                    }
+                }
+            } else if app.show_standalone_tools {
+                if app.standalone_tools_scanning {
+                    match key.code {
+                        KeyCode::Char('b') => return KeyAction::BackStandaloneTools,
+                        KeyCode::Char('f') => return KeyAction::FullDisk,
+                        _ => {}
+                    }
+                } else {
+                    match key.code {
+                        KeyCode::Down | KeyCode::Char('j') => app.move_standalone_cursor(1),
+                        KeyCode::Up | KeyCode::Char('k') => app.move_standalone_cursor(-1),
+                        KeyCode::Enter | KeyCode::Char('x') => {
+                            return KeyAction::UninstallStandalone
+                        }
+                        KeyCode::Char('g') => return KeyAction::GlobalTools,
+                        KeyCode::Char('r') => return KeyAction::StandaloneTools,
+                        KeyCode::Char('b') => return KeyAction::BackStandaloneTools,
                         KeyCode::Char('f') => return KeyAction::FullDisk,
                         _ => {}
                     }
@@ -119,6 +146,7 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) -> KeyAction {
                     KeyCode::Char('d') => app.dry_run = !app.dry_run,
                     KeyCode::Char('f') => return KeyAction::FullDisk,
                     KeyCode::Char('g') => return KeyAction::GlobalTools,
+                    KeyCode::Char('s') => return KeyAction::StandaloneTools,
                     KeyCode::Char('r') => return KeyAction::Rescan,
                     KeyCode::Enter if app.trash_selected => {
                         app.confirm_text.clear();
@@ -177,6 +205,19 @@ pub(crate) fn handle_confirmation(app: &mut App, key: KeyEvent) {
                 app.mode = Mode::Reviewing;
             }
             KeyCode::Char('y') => start_global_uninstall(app),
+            _ => {}
+        }
+        return;
+    }
+
+    if app.pending_standalone_uninstall.is_some() {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('n') => {
+                app.pending_standalone_uninstall = None;
+                app.confirm_text.clear();
+                app.mode = Mode::Reviewing;
+            }
+            KeyCode::Char('y') => start_standalone_uninstall(app),
             _ => {}
         }
         return;

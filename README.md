@@ -206,6 +206,15 @@ the inventory reloads automatically. cleanrs never deletes a package-manager
 directory directly, and npm itself is shown as `KEEP` because it manages its
 own installation.
 
+Press s to open the separate standalone-install inventory. It checks direct
+executable entries in common user-owned binary roots such as ~/.local/bin,
+~/bin, ~/.deno/bin, ~/.bun/bin, and ~/.volta/bin. This is intended for tools
+installed by a curl/bootstrap script or a direct user installer when no package
+manager can report provenance. Each item shows its exact path and size; cleanrs
+only moves that one file or symlink to Trash after confirmation, never the
+whole root directory. The scan cannot prove installer provenance, so review
+the path before removal. The currently running cleanrs binary is protected.
+
 Homebrew casks may require administrator authentication: run sudo -v in a
 separate Terminal first. cleanrs checks cached authentication without
 collecting or storing the password, so a missing credential fails clearly
