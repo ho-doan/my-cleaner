@@ -122,6 +122,7 @@ struct App {
     active_cleaner: Option<String>,
     active_target: Option<String>,
     active_target_size: u64,
+    active_detail: Option<String>,
     last_action: Option<String>,
 }
 
@@ -172,6 +173,7 @@ impl App {
             active_cleaner: None,
             active_target: None,
             active_target_size: 0,
+            active_detail: None,
             last_action: None,
         }
     }
@@ -214,6 +216,7 @@ impl App {
         self.active_cleaner = None;
         self.active_target = None;
         self.active_target_size = 0;
+        self.active_detail = None;
         self.disk = read_disk_usage().or(self.disk);
     }
 
@@ -386,6 +389,7 @@ enum CleanMessage {
         cleaner_id: String,
         target: CleanTarget,
     },
+    Progress(String),
     Target(Result<CleanResult, String>),
     Finished,
 }
@@ -496,6 +500,7 @@ fn start_explorer_delete(app: &mut App) {
     app.active_cleaner = Some("explorer".to_owned());
     app.active_target = Some(target.path.display().to_string());
     app.active_target_size = target.size_bytes;
+    app.active_detail = Some("moving selected item to Trash".to_owned());
     app.explorer_delete_receiver = Some(receiver);
 
     rayon::spawn(move || {
@@ -520,6 +525,7 @@ fn start_global_uninstall(app: &mut App) {
     app.active_cleaner = Some(tool.manager.label().to_owned());
     app.active_target = Some(tool.name.clone());
     app.active_target_size = 0;
+    app.active_detail = Some("waiting for package manager".to_owned());
     app.global_uninstall_receiver = Some(receiver);
 
     rayon::spawn(move || {
@@ -555,6 +561,7 @@ fn start_cleaning(app: &mut App) {
     app.active_cleaner = None;
     app.active_target = None;
     app.active_target_size = 0;
+    app.active_detail = None;
     app.clean_receiver = Some(receiver);
 
     rayon::spawn(move || {
@@ -570,9 +577,15 @@ fn start_cleaning(app: &mut App) {
                 return;
             }
             let outcome = match cleaners.iter().find(|cleaner| cleaner.id() == cleaner_id) {
-                Some(cleaner) => cleaner
-                    .clean(&target, dry_run)
-                    .map_err(|error| format!("{cleaner_id}: {error:#}")),
+                Some(cleaner) => {
+                    let progress_sender = sender.clone();
+                    let mut progress = move |detail: String| {
+                        let _ = progress_sender.send(CleanMessage::Progress(detail));
+                    };
+                    cleaner
+                        .clean_with_progress(&target, dry_run, &mut progress)
+                        .map_err(|error| format!("{cleaner_id}: {error:#}"))
+                }
                 None => Err(format!("unknown cleaner {cleaner_id}")),
             };
             if sender.send(CleanMessage::Target(outcome)).is_err() {
@@ -857,6 +870,7 @@ fn receive_explorer_delete(
             app.active_cleaner = None;
             app.active_target = None;
             app.active_target_size = 0;
+            app.active_detail = None;
             let disk_after = read_disk_usage().or(app.cleaning_disk_before);
             app.disk = disk_after;
             match outcome {
@@ -884,6 +898,7 @@ fn receive_explorer_delete(
             app.active_cleaner = None;
             app.active_target = None;
             app.active_target_size = 0;
+            app.active_detail = None;
             app.mode = Mode::Reviewing;
             app.last_action = Some("File delete worker stopped unexpectedly".to_owned());
         }
@@ -906,6 +921,7 @@ fn receive_global_uninstall(
             app.active_cleaner = None;
             app.active_target = None;
             app.active_target_size = 0;
+            app.active_detail = None;
             app.disk = read_disk_usage().or(app.disk);
             app.cleaning_disk_before = None;
             match outcome {
@@ -935,6 +951,7 @@ fn receive_global_uninstall(
             app.active_cleaner = None;
             app.active_target = None;
             app.active_target_size = 0;
+            app.active_detail = None;
             app.cleaning_disk_before = None;
             app.mode = Mode::Reviewing;
             app.last_action = Some("Global uninstall worker stopped unexpectedly".to_owned());
@@ -955,6 +972,10 @@ fn receive_cleaning(app: &mut App) -> bool {
                 app.active_cleaner = Some(cleaner_id);
                 app.active_target = Some(target.path.display().to_string());
                 app.active_target_size = target.size_bytes;
+                app.active_detail = Some("starting cleanup command".to_owned());
+            }
+            Ok(CleanMessage::Progress(detail)) => {
+                app.active_detail = Some(detail);
             }
             Ok(CleanMessage::Target(outcome)) => {
                 app.cleaning_completed += 1;
@@ -1015,6 +1036,7 @@ fn receive_cleaning(app: &mut App) -> bool {
     app.active_cleaner = None;
     app.active_target = None;
     app.active_target_size = 0;
+    app.active_detail = None;
 
     if dry_run {
         app.mode = Mode::Reviewing;
@@ -2687,6 +2709,11 @@ fn footer_lines(app: &App) -> Vec<Line<'static>> {
                 format!(" · {}", format_size(app.active_target_size, DECIMAL))
             };
             let active_owner = app.active_cleaner.as_deref().unwrap_or("cleaner");
+            let active_detail = app
+                .active_detail
+                .as_deref()
+                .map(|detail| shorten(detail, 58))
+                .unwrap_or_else(|| "worker active".to_owned());
             vec![
                 footer_line(
                     "STATUS",
@@ -2713,7 +2740,7 @@ fn footer_lines(app: &App) -> Vec<Line<'static>> {
                 footer_line(
                     "PROGRESS",
                     vec![Span::styled(
-                        format!("{percent}% overall · worker active; large folders may take time"),
+                        format!("{percent}% overall · {active_detail}"),
                         Style::default().fg(Color::Gray),
                     )],
                 ),

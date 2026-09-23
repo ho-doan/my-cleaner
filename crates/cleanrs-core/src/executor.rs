@@ -5,8 +5,10 @@ use crate::{
 };
 use anyhow::{anyhow, bail, Context, Result};
 use std::{
-    io::Write,
+    io::{Read, Write},
     process::{Command, Stdio},
+    sync::mpsc,
+    thread,
 };
 
 pub fn clean_target(cleaner_id: &str, target: &CleanTarget, dry_run: bool) -> Result<CleanResult> {
@@ -33,6 +35,24 @@ pub fn clean_target_with_options(
     cleaner_id: &str,
     target: &CleanTarget,
     options: CleanOptions,
+) -> Result<CleanResult> {
+    clean_target_with_progress(cleaner_id, target, options, &mut |_| {})
+}
+
+#[tracing::instrument(
+    skip(target, progress),
+    fields(
+        cleaner_id,
+        target = %target.path.display(),
+        dry_run = options.dry_run,
+        permanent = options.permanent
+    )
+)]
+pub fn clean_target_with_progress(
+    cleaner_id: &str,
+    target: &CleanTarget,
+    options: CleanOptions,
+    progress: &mut dyn FnMut(String),
 ) -> Result<CleanResult> {
     if !can_delete_path(&target.path) {
         let error = anyhow!(
@@ -67,9 +87,9 @@ pub fn clean_target_with_options(
         })
     } else {
         let message = match &target.method {
-            CleanMethod::RunCommand(arguments) => execute_command(arguments, None)?,
+            CleanMethod::RunCommand(arguments) => execute_command(arguments, None, progress)?,
             CleanMethod::RunCommandWithInput { arguments, stdin } => {
-                execute_command(arguments, Some(stdin.as_bytes()))?
+                execute_command(arguments, Some(stdin.as_bytes()), progress)?
             }
             CleanMethod::TrashPath if options.permanent => {
                 delete_permanently(&target.path)?;
@@ -125,12 +145,16 @@ fn delete_permanently(path: &std::path::Path) -> Result<()> {
     .with_context(|| format!("permanently delete {}", path.display()))
 }
 
-fn execute_command(arguments: &[String], stdin: Option<&[u8]>) -> Result<String> {
+fn execute_command(
+    arguments: &[String],
+    stdin: Option<&[u8]>,
+    progress: &mut dyn FnMut(String),
+) -> Result<String> {
     let (program, args) = arguments
         .split_first()
         .context("clean command cannot be empty")?;
 
-    let output = if let Some(input) = stdin {
+    let (status, output_lines) = if let Some(input) = stdin {
         let mut child = Command::new(program)
             .args(args)
             .stdin(Stdio::piped())
@@ -144,38 +168,110 @@ fn execute_command(arguments: &[String], stdin: Option<&[u8]>) -> Result<String>
                 .write_all(input)
                 .with_context(|| format!("failed to provide input to clean command {program}"))?;
         }
-        child
-            .wait_with_output()
-            .with_context(|| format!("failed waiting for clean command {program}"))?
+        stream_command_output(child, arguments, progress)?
     } else {
-        Command::new(program)
+        let child = Command::new(program)
             .args(args)
             .stdin(Stdio::null())
-            .output()
-            .with_context(|| format!("failed to start clean command {program}"))?
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .with_context(|| format!("failed to start clean command {program}"))?;
+        stream_command_output(child, arguments, progress)?
     };
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-        let detail = if stderr.is_empty() {
-            String::new()
-        } else {
-            format!(": {stderr}")
-        };
+    if !status.success() {
+        let detail = output_lines
+            .iter()
+            .rev()
+            .take(3)
+            .rev()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join("; ");
         bail!(
             "clean command {} exited with status {}{}",
             arguments.join(" "),
-            output.status,
-            detail
+            status,
+            if detail.is_empty() {
+                String::new()
+            } else {
+                format!(": {detail}")
+            }
         );
     }
 
     Ok(format!("executed: {}", arguments.join(" ")))
 }
 
+fn stream_command_output(
+    mut child: std::process::Child,
+    arguments: &[String],
+    progress: &mut dyn FnMut(String),
+) -> Result<(std::process::ExitStatus, Vec<String>)> {
+    let stdout = child
+        .stdout
+        .take()
+        .context("clean command stdout was not captured")?;
+    let stderr = child
+        .stderr
+        .take()
+        .context("clean command stderr was not captured")?;
+    let (sender, receiver) = mpsc::channel::<String>();
+
+    spawn_output_reader(stdout, sender.clone());
+    spawn_output_reader(stderr, sender.clone());
+    drop(sender);
+
+    progress(format!("running {}", arguments.join(" ")));
+    let mut output_lines = Vec::new();
+    while let Ok(line) = receiver.recv() {
+        if !line.trim().is_empty() {
+            progress(line.clone());
+            output_lines.push(line);
+        }
+    }
+
+    let status = child
+        .wait()
+        .with_context(|| format!("failed waiting for clean command {}", arguments[0]))?;
+    Ok((status, output_lines))
+}
+
+fn spawn_output_reader<R>(stream: R, sender: mpsc::Sender<String>)
+where
+    R: Read + Send + 'static,
+{
+    thread::spawn(move || {
+        let mut stream = stream;
+        let mut buffer = [0_u8; 1024];
+        let mut pending = Vec::new();
+        loop {
+            let read = match stream.read(&mut buffer) {
+                Ok(0) | Err(_) => break,
+                Ok(read) => read,
+            };
+            for byte in &buffer[..read] {
+                if matches!(byte, b'\n' | b'\r') {
+                    if !pending.is_empty() {
+                        let line = String::from_utf8_lossy(&pending).into_owned();
+                        let _ = sender.send(line);
+                        pending.clear();
+                    }
+                } else {
+                    pending.push(*byte);
+                }
+            }
+        }
+        if !pending.is_empty() {
+            let _ = sender.send(String::from_utf8_lossy(&pending).into_owned());
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
-    use super::clean_target;
+    use super::{clean_target, clean_target_with_progress};
     use crate::model::{CleanMethod, CleanTarget};
     use std::path::PathBuf;
 
@@ -199,6 +295,33 @@ mod tests {
 
         assert!(result.executed);
         assert!(result.success);
+    }
+
+    #[test]
+    fn streams_command_output_to_progress_callback() {
+        let target = CleanTarget {
+            path: PathBuf::from("test://streaming-command"),
+            size_bytes: 1,
+            description: "test command".to_owned(),
+            method: CleanMethod::RunCommand(vec![
+                "sh".to_owned(),
+                "-c".to_owned(),
+                "printf 'step-one\\n'; printf 'step-two\\r' >&2".to_owned(),
+            ]),
+        };
+        let mut updates = Vec::new();
+
+        let result = clean_target_with_progress(
+            "test",
+            &target,
+            crate::model::CleanOptions::default(),
+            &mut |update| updates.push(update),
+        )
+        .expect("command should succeed");
+
+        assert!(result.executed);
+        assert!(updates.iter().any(|update| update == "step-one"));
+        assert!(updates.iter().any(|update| update == "step-two"));
     }
 
     #[test]

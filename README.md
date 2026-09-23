@@ -115,6 +115,10 @@ files were removed. In execute mode, Safe and Caution targets can be cleaned;
 Manual targets require the explicit FORCE confirmation. After an actual clean,
 the TUI shows background progress per target, then rescans and refreshes the
 disk snapshot. Press r to reload manually.
+For long-running command-backed cleaners such as `uv cache clean`, the TUI
+streams command output when available and shows the active target, estimated
+size, elapsed time, and heartbeat while the worker is still running. The
+underlying command remains the package manager's official cleanup command.
 
 Press f for an inventory of the largest root-disk and HOME directories; b
 returns to cleanup targets. From the inventory, press Enter on a folder to scan

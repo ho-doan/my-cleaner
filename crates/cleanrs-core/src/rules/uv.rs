@@ -40,6 +40,9 @@ impl Cleaner for UvCleaner {
                 "uv".to_owned(),
                 "cache".to_owned(),
                 "clean".to_owned(),
+                "--verbose".to_owned(),
+                "--color".to_owned(),
+                "never".to_owned(),
             ]),
         )?
         else {

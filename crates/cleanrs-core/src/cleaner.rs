@@ -1,4 +1,4 @@
-use crate::executor::{clean_target, clean_target_with_options};
+use crate::executor::{clean_target, clean_target_with_options, clean_target_with_progress};
 use crate::model::{Category, CleanOptions, CleanResult, CleanTarget, RiskLevel};
 use crate::rules;
 use anyhow::Result;
@@ -16,6 +16,23 @@ pub trait Cleaner: Send + Sync {
 
     fn clean(&self, target: &CleanTarget, dry_run: bool) -> Result<CleanResult> {
         clean_target(self.id(), target, dry_run)
+    }
+
+    fn clean_with_progress(
+        &self,
+        target: &CleanTarget,
+        dry_run: bool,
+        progress: &mut dyn FnMut(String),
+    ) -> Result<CleanResult> {
+        clean_target_with_progress(
+            self.id(),
+            target,
+            CleanOptions {
+                dry_run,
+                permanent: false,
+            },
+            progress,
+        )
     }
 
     #[tracing::instrument(
