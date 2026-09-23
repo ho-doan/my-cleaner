@@ -169,7 +169,7 @@ fn target_list_item(row: &TargetRow, width: usize) -> ListItem<'static> {
     ListItem::new(lines)
 }
 
-fn wrap_text(text: &str, width: usize) -> Vec<String> {
+pub(crate) fn wrap_text(text: &str, width: usize) -> Vec<String> {
     let width = width.max(1);
     let mut lines = Vec::new();
     let mut current = String::new();

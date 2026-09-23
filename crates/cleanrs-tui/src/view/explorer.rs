@@ -8,6 +8,7 @@ use ratatui::{
     Frame,
 };
 
+use super::targets::wrap_text;
 use crate::model::App;
 
 pub(crate) fn render_full_disk(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
@@ -153,42 +154,13 @@ pub(crate) fn render_directory(frame: &mut Frame, app: &App, area: ratatui::layo
         if report.entries.is_empty() {
             items.push(ListItem::new("No readable children."));
         } else {
-            items.extend(report.entries.iter().map(|entry| {
-                let (marker, color) = if entry.read_only {
-                    ("READONLY", Color::Red)
-                } else if entry.allowlisted {
-                    ("ALLOW", Color::Green)
-                } else if entry
-                    .suggestion
-                    .as_ref()
-                    .is_some_and(|suggestion| suggestion.can_delete)
-                {
-                    ("SUGGEST", Color::Green)
-                } else if entry.suggestion.is_some() {
-                    ("REVIEW", Color::Yellow)
-                } else if entry.is_dir {
-                    ("DIR", Color::Cyan)
-                } else {
-                    ("FILE", Color::Gray)
-                };
-                let reason = entry
-                    .suggestion
-                    .as_ref()
-                    .map(|suggestion| format!(" — {}", suggestion.reason))
-                    .unwrap_or_default();
-                ListItem::new(Line::from(vec![
-                    Span::styled(
-                        format!("[{marker}]"),
-                        Style::default().fg(color).add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(
-                        format!("  {}  ", format_size(entry.size_bytes, DECIMAL)),
-                        Style::default().fg(Color::Gray),
-                    ),
-                    Span::raw(entry.path.display().to_string()),
-                    Span::styled(reason, Style::default().fg(Color::Gray)),
-                ]))
-            }));
+            let width = area.width.saturating_sub(6) as usize;
+            items.extend(
+                report
+                    .entries
+                    .iter()
+                    .map(|entry| directory_list_item(entry, width)),
+            );
             selected_index = Some(entry_start + app.directory_cursor);
         }
         items.push(ListItem::new(format!(
@@ -214,4 +186,68 @@ pub(crate) fn render_directory(frame: &mut Frame, app: &App, area: ratatui::layo
                 .add_modifier(Modifier::BOLD),
         );
     frame.render_stateful_widget(list, area, &mut state);
+}
+
+fn directory_list_item(
+    entry: &cleanrs_core::DirectoryScanEntry,
+    width: usize,
+) -> ListItem<'static> {
+    let (marker, color) = if entry.read_only {
+        ("READONLY", Color::Red)
+    } else if entry.allowlisted {
+        ("ALLOW", Color::Green)
+    } else if entry
+        .suggestion
+        .as_ref()
+        .is_some_and(|suggestion| suggestion.can_delete)
+    {
+        ("SUGGEST", Color::Green)
+    } else if entry.suggestion.is_some() {
+        ("REVIEW", Color::Yellow)
+    } else if entry.is_dir {
+        ("DIR", Color::Cyan)
+    } else {
+        ("FILE", Color::Gray)
+    };
+    let size = format_size(entry.size_bytes, DECIMAL);
+    let path = entry.path.display().to_string();
+    let reason = entry
+        .suggestion
+        .as_ref()
+        .map(|suggestion| format!(" — {}", suggestion.reason))
+        .unwrap_or_default();
+    let full_text = format!("[{marker}]  {size}  {path}{reason}");
+
+    if full_text.chars().count() <= width {
+        return ListItem::new(Line::from(vec![
+            Span::styled(
+                format!("[{marker}]"),
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(format!("  {size}  "), Style::default().fg(Color::Gray)),
+            Span::raw(path),
+            Span::styled(reason, Style::default().fg(Color::Gray)),
+        ]));
+    }
+
+    let header = format!("[{marker}]  {size}");
+    let detail_indent = "  ↳ ";
+    let detail_width = width.saturating_sub(detail_indent.chars().count()).max(1);
+    let detail = format!("{path}{reason}");
+    let mut lines = wrap_text(&header, width)
+        .into_iter()
+        .map(|line| {
+            Line::from(Span::styled(
+                line,
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            ))
+        })
+        .collect::<Vec<_>>();
+    lines.extend(wrap_text(&detail, detail_width).into_iter().map(|line| {
+        Line::from(vec![
+            Span::styled(detail_indent, Style::default().fg(Color::DarkGray)),
+            Span::raw(line),
+        ])
+    }));
+    ListItem::new(lines)
 }
