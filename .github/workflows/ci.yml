@@ -8,7 +8,11 @@ on:
 
 jobs:
   test:
-    runs-on: macos-14
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, windows-latest]
+    runs-on: "${{ matrix.os }}"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

@@ -1,3 +1,4 @@
+use crate::platform::config;
 use crate::scanner::is_protected_path;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -46,7 +47,7 @@ pub fn toggle_delete_allowlist(path: &Path) -> Result<bool> {
     if is_protected_path(path) {
         anyhow::bail!("protected system paths cannot be added to the delete allowlist");
     }
-    if std::env::var_os("HOME").is_some_and(|home| path == Path::new(&home)) {
+    if config::home_dir().is_some_and(|home| path == home) {
         anyhow::bail!("the home directory cannot be added to the delete allowlist");
     }
 
@@ -63,11 +64,11 @@ pub fn toggle_delete_allowlist(path: &Path) -> Result<bool> {
 }
 
 fn allowlist_path() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(|home| PathBuf::from(home).join(ALLOWLIST_FILE))
+    config::home_path(ALLOWLIST_FILE)
 }
 
 fn write_allowlist(paths: &BTreeSet<PathBuf>) -> Result<()> {
-    let path = allowlist_path().context("HOME is not set for delete allowlist")?;
+    let path = allowlist_path().context("user home is not set for delete allowlist")?;
     let parent = path
         .parent()
         .context("delete allowlist has no parent directory")?;

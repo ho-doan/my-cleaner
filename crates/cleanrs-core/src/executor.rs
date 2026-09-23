@@ -277,16 +277,25 @@ mod tests {
 
     #[test]
     fn run_command_with_input_supplies_confirmation_without_inheriting_tui_stdin() {
+        let arguments = if cfg!(target_os = "windows") {
+            vec![
+                "cmd".to_owned(),
+                "/C".to_owned(),
+                "set /p answer= && if \"%answer%\"==\"y\" exit /b 0".to_owned(),
+            ]
+        } else {
+            vec![
+                "sh".to_owned(),
+                "-c".to_owned(),
+                "read answer && test \"$answer\" = y".to_owned(),
+            ]
+        };
         let target = CleanTarget {
             path: PathBuf::from("test://interactive-command"),
             size_bytes: 1,
             description: "test command".to_owned(),
             method: CleanMethod::RunCommandWithInput {
-                arguments: vec![
-                    "sh".to_owned(),
-                    "-c".to_owned(),
-                    "read answer && test \"$answer\" = y".to_owned(),
-                ],
+                arguments,
                 stdin: "y\n".to_owned(),
             },
         };
@@ -299,15 +308,24 @@ mod tests {
 
     #[test]
     fn streams_command_output_to_progress_callback() {
+        let arguments = if cfg!(target_os = "windows") {
+            vec![
+                "cmd".to_owned(),
+                "/C".to_owned(),
+                "echo step-one & echo step-two 1>&2".to_owned(),
+            ]
+        } else {
+            vec![
+                "sh".to_owned(),
+                "-c".to_owned(),
+                "printf 'step-one\\n'; printf 'step-two\\r' >&2".to_owned(),
+            ]
+        };
         let target = CleanTarget {
             path: PathBuf::from("test://streaming-command"),
             size_bytes: 1,
             description: "test command".to_owned(),
-            method: CleanMethod::RunCommand(vec![
-                "sh".to_owned(),
-                "-c".to_owned(),
-                "printf 'step-one\\n'; printf 'step-two\\r' >&2".to_owned(),
-            ]),
+            method: CleanMethod::RunCommand(arguments),
         };
         let mut updates = Vec::new();
 
@@ -325,9 +343,15 @@ mod tests {
     }
 
     #[test]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     fn refuses_protected_system_paths() {
+        let protected_path = if cfg!(target_os = "windows") {
+            PathBuf::from(r"C:\Windows\System32")
+        } else {
+            PathBuf::from("/System/Library")
+        };
         let target = CleanTarget {
-            path: PathBuf::from("/System/Library"),
+            path: protected_path,
             size_bytes: 1,
             description: "protected path".to_owned(),
             method: CleanMethod::TrashPath,

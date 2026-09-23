@@ -5,6 +5,11 @@ implements a read-only scan and command-backed cleanup for npm, Homebrew, pip,
 uv, Yarn, pnpm, Cargo, Docker, and common coding-agent caches (Codex, Claude
 Code, Kiro CLI, Ollama, and other known cache locations).
 
+The core now has explicit `platform/macos` and `platform/windows` configuration
+boundaries. The current public release remains macOS-only; Windows support is
+being built on the shared scanner, TUI, and cleanup model before a Windows
+installer is published.
+
 ## Usage
 
     cargo run -p cleanrs -- list

@@ -2,10 +2,10 @@
 
 use anyhow::Result;
 use cleanrs_core::{
-    all_cleaners, check_latest_release, full_disk_scan, scan_all_reports, scan_cleaner,
-    scan_directory, scan_global_tools, toggle_delete_allowlist, uninstall_global_tool, CleanMethod,
-    CleanTarget, CleanerScan, DirectoryScan, FullDiskScan, GlobalTool, GlobalToolScan,
-    ReadOnlyScan, UpdateInfo,
+    all_cleaners, check_latest_release, default_scan_root, full_disk_scan, scan_all_reports,
+    scan_cleaner, scan_directory, scan_global_tools, toggle_delete_allowlist,
+    uninstall_global_tool, CleanMethod, CleanTarget, CleanerScan, DirectoryScan, FullDiskScan,
+    GlobalTool, GlobalToolScan, ReadOnlyScan, UpdateInfo,
 };
 use crossbeam_channel::{unbounded, Receiver, TryRecvError};
 use crossterm::event::{self, Event, KeyEventKind};
@@ -58,7 +58,8 @@ fn start_update_check(current_version: String) -> Receiver<Result<Option<UpdateI
 fn start_full_disk_scan() -> Receiver<Result<FullDiskScan, String>> {
     let (sender, receiver) = unbounded();
     rayon::spawn(move || {
-        let result = full_disk_scan(Path::new("/"), 12).map_err(|error| format!("{error:#}"));
+        let root = default_scan_root();
+        let result = full_disk_scan(&root, 12).map_err(|error| format!("{error:#}"));
         let _ = sender.send(result);
     });
     receiver
@@ -310,7 +311,7 @@ pub(crate) fn run_loop(stdout: &mut Stdout, current_version: &str) -> Result<Run
                                 continue;
                             }
                             if let Some(previous) = app.directory_history.pop() {
-                                if previous == Path::new("/") {
+                                if previous == default_scan_root() {
                                     app.directory_scan = None;
                                     app.directory_error = None;
                                     app.directory_cursor = 0;
@@ -440,8 +441,8 @@ pub(crate) fn run_loop(stdout: &mut Stdout, current_version: &str) -> Result<Run
                                             entry
                                                 .path
                                                 .parent()
-                                                .unwrap_or_else(|| Path::new("/"))
-                                                .to_path_buf()
+                                                .map(Path::to_path_buf)
+                                                .unwrap_or_else(default_scan_root)
                                         }
                                     })
                             };
@@ -450,7 +451,7 @@ pub(crate) fn run_loop(stdout: &mut Stdout, current_version: &str) -> Result<Run
                                     .directory_scan
                                     .as_ref()
                                     .map(|scan| scan.path.clone())
-                                    .unwrap_or_else(|| PathBuf::from("/"));
+                                    .unwrap_or_else(default_scan_root);
                                 app.directory_history.push(current);
                                 queue_directory_scan(&mut app, &mut directory_receiver, path);
                             }

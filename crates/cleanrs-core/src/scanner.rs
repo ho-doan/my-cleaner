@@ -5,6 +5,10 @@ use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::platform::config;
+
+const STANDARD_HOME_DIRECTORIES: [&str; 3] = config::STANDARD_HOME_DIRECTORIES;
+
 #[derive(Clone, Debug, Serialize)]
 pub struct DiskScanEntry {
     pub path: PathBuf,
@@ -96,7 +100,7 @@ pub fn full_disk_scan(root: &Path, limit: usize) -> Result<FullDiskScan> {
         anyhow::bail!("full-disk scan root is not a directory: {}", root.display());
     }
 
-    let readonly_paths = excluded_root_paths(root);
+    let readonly_paths = config::excluded_root_paths(root);
     let (mut root_entries, root_inaccessible) =
         scan_children(root, &readonly_paths).with_context(|| format!("scan {}", root.display()))?;
     let (mut readonly_entries, readonly_inaccessible) = scan_readonly_paths(&readonly_paths);
@@ -104,8 +108,8 @@ pub fn full_disk_scan(root: &Path, limit: usize) -> Result<FullDiskScan> {
     root_entries.truncate(limit);
     readonly_entries.sort_by_key(|entry| entry.path.clone());
 
-    let (home_entries, home_inaccessible) = match std::env::var_os("HOME") {
-        Some(home) => scan_home_entries(Path::new(&home), limit)?,
+    let (home_entries, home_inaccessible) = match config::home_dir() {
+        Some(home) => scan_home_entries(&home, limit)?,
         None => (Vec::new(), 0),
     };
 
@@ -125,12 +129,7 @@ pub fn full_disk_scan(root: &Path, limit: usize) -> Result<FullDiskScan> {
 /// protected by this policy. They can be inspected and may receive a cleanup
 /// suggestion, while still requiring an approved cleaner before deletion.
 pub fn is_protected_path(path: &Path) -> bool {
-    [
-        "/System", "/Library", "/Volumes", "/private", "/dev", "/cores", "/usr", "/bin", "/sbin",
-    ]
-    .into_iter()
-    .map(Path::new)
-    .any(|protected| path == protected || path.starts_with(protected))
+    config::is_protected_path(path)
 }
 
 /// Returns whether an explorer-selected path is safe enough for an explicit
@@ -157,8 +156,8 @@ pub fn scan_directory(path: &Path, limit: usize) -> Result<DirectoryScan> {
         anyhow::bail!("directory scan path is not a directory: {}", path.display());
     }
 
-    let readonly_paths = if path == Path::new("/") {
-        excluded_root_paths(path)
+    let readonly_paths = if config::is_default_scan_root(path) {
+        config::excluded_root_paths(path)
     } else {
         Vec::new()
     };
@@ -334,25 +333,13 @@ fn file_suggestion(path: &Path) -> Option<DirectorySuggestion> {
 }
 
 fn user_file_area(path: &Path) -> Option<&'static str> {
-    let home = std::env::var_os("HOME").map(PathBuf::from)?;
+    let home = config::home_dir()?;
     ["Downloads", "Desktop", "Documents"]
         .into_iter()
         .find(|area| {
             let root = home.join(area);
             path.starts_with(&root) && path != root
         })
-}
-
-const STANDARD_HOME_DIRECTORIES: [&str; 3] = ["Desktop", "Documents", "Downloads"];
-
-fn excluded_root_paths(root: &Path) -> Vec<PathBuf> {
-    [
-        "System", "Library", "Volumes", "private", "dev", "cores", "usr", "bin", "sbin",
-    ]
-    .into_iter()
-    .map(|name| root.join(name))
-    .filter(|path| path.exists())
-    .collect()
 }
 
 fn scan_children(parent: &Path, excluded: &[PathBuf]) -> Result<(Vec<DiskScanEntry>, usize)> {
@@ -488,7 +475,7 @@ fn tolerant_dir_size(path: &Path) -> (u64, usize) {
 #[cfg(test)]
 mod tests {
     use super::{
-        dir_size, directory_suggestion, file_suggestion, is_protected_path,
+        config, dir_size, directory_suggestion, file_suggestion, is_protected_path,
         readonly_directory_entry, scan_directory, scan_home_entries, scan_readonly_paths,
         STANDARD_HOME_DIRECTORIES,
     };
@@ -545,6 +532,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn home_data_is_reviewable_not_system_read_only() {
         assert!(is_protected_path(std::path::Path::new("/System/Library")));
         assert!(is_protected_path(std::path::Path::new("/private/var")));
@@ -624,7 +612,7 @@ mod tests {
 
     #[test]
     fn user_file_area_items_are_explicitly_deletable() {
-        let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
+        let Some(home) = config::home_dir() else {
             return;
         };
         for area in ["Downloads", "Desktop", "Documents"] {
@@ -664,6 +652,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn protected_transient_files_get_explicit_review_suggestions() {
         let core_dump =
             file_suggestion(Path::new("/cores/core.123")).expect("core dump should be recognized");

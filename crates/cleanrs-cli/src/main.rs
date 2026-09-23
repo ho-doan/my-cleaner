@@ -2,13 +2,12 @@ use anyhow::{bail, Result};
 use clap::{Args, Parser, Subcommand};
 use cleanrs_core::history::record_history;
 use cleanrs_core::{
-    all_cleaners, full_disk_scan, scan_all, scan_all_reports, CleanOptions, CleanResult, Cleaner,
-    CleanerScan, FullDiskScan, ReadOnlyScan, RiskLevel,
+    all_cleaners, default_scan_root, full_disk_scan, scan_all, scan_all_reports, CleanOptions,
+    CleanResult, Cleaner, CleanerScan, FullDiskScan, ReadOnlyScan, RiskLevel,
 };
 use comfy_table::{presets::UTF8_FULL, Table};
 use humansize::{format_size, DECIMAL};
 use serde::Serialize;
-use std::path::Path;
 
 #[derive(Debug, Parser)]
 #[command(name = "cleanrs", version, about = "Safe, rule-based disk cleanup")]
@@ -130,7 +129,8 @@ fn scan_command(args: ScanArgs) -> Result<()> {
         if args.only.is_some() {
             bail!("--full-disk cannot be combined with --only");
         }
-        let report = full_disk_scan(Path::new("/"), args.top)?;
+        let root = default_scan_root();
+        let report = full_disk_scan(&root, args.top)?;
         if args.json {
             println!("{}", serde_json::to_string_pretty(&report)?);
         } else {

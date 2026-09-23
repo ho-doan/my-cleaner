@@ -65,7 +65,7 @@ pub struct CleanerScan {
 }
 
 pub fn all_cleaners() -> Vec<Box<dyn Cleaner>> {
-    vec![
+    let mut cleaners: Vec<Box<dyn Cleaner>> = vec![
         Box::new(rules::agent_cache::AgentCacheCleaner),
         Box::new(rules::configured::ConfiguredCleaner),
         Box::new(rules::cargo::CargoCleaner),
@@ -73,26 +73,34 @@ pub fn all_cleaners() -> Vec<Box<dyn Cleaner>> {
         Box::new(rules::claude::ClaudeCleaner),
         Box::new(rules::dart::DartCleaner),
         Box::new(rules::npm::NpmCleaner),
-        Box::new(rules::brew::BrewCleaner),
         Box::new(rules::pip::PipCleaner),
         Box::new(rules::pnpm::PnpmCleaner),
         Box::new(rules::uv::UvCleaner),
         Box::new(rules::yarn::YarnCleaner),
         Box::new(rules::gradle::GradleCleaner),
         Box::new(rules::maven::MavenCleaner),
-        Box::new(rules::macos_system::MacosSystemCleaner),
         Box::new(rules::kiro::KiroCleaner),
         Box::new(rules::ollama::OllamaCleaner),
-        Box::new(rules::docker_desktop::DockerDesktopCleaner),
-        Box::new(rules::app_leftovers::AppLeftoverCleaner),
-        Box::new(rules::personal::PersonalDataCleaner),
-        Box::new(rules::simulator::SimulatorUnavailableCleaner),
-        Box::new(rules::xcode::XcodeCleaner),
-        Box::new(rules::xcode::XcodeArchivesCleaner),
-        Box::new(rules::xcode::SimulatorCacheCleaner),
         Box::new(rules::docker::DockerCleaner),
-        Box::new(rules::trash::TrashCleaner),
-    ]
+    ];
+
+    #[cfg(target_os = "macos")]
+    {
+        cleaners.extend([
+            Box::new(rules::macos_system::MacosSystemCleaner) as Box<dyn Cleaner>,
+            Box::new(rules::brew::BrewCleaner),
+            Box::new(rules::docker_desktop::DockerDesktopCleaner),
+            Box::new(rules::app_leftovers::AppLeftoverCleaner),
+            Box::new(rules::personal::PersonalDataCleaner),
+            Box::new(rules::simulator::SimulatorUnavailableCleaner),
+            Box::new(rules::xcode::XcodeCleaner),
+            Box::new(rules::xcode::XcodeArchivesCleaner),
+            Box::new(rules::xcode::SimulatorCacheCleaner),
+            Box::new(rules::trash::TrashCleaner),
+        ]);
+    }
+
+    cleaners
 }
 
 #[tracing::instrument(skip(cleaner), fields(cleaner_id = cleaner.id()))]

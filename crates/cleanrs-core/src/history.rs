@@ -16,7 +16,7 @@ pub fn history_path() -> Option<PathBuf> {
     if cfg!(test) {
         return None;
     }
-    std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cleanrs/history.log"))
+    crate::platform::config::home_path(".cleanrs/history.log")
 }
 
 #[derive(Serialize)]

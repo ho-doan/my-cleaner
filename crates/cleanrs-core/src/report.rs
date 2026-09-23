@@ -1,5 +1,6 @@
+use crate::platform::config;
 use crate::scanner::dir_size;
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::Serialize;
 use std::path::PathBuf;
 
@@ -34,26 +35,10 @@ impl ReportOnly for ProtectedSystemReport {
     }
 
     fn scan(&self) -> Result<Vec<ReadOnlyTarget>> {
-        let fixed_paths = [
-            (PathBuf::from("/Library/Updates"), "macOS update leftovers"),
-            (PathBuf::from("/macOS Install Data"), "macOS installer data"),
-        ];
         let mut targets = Vec::new();
-        for (path, description) in fixed_paths {
+        for (path, description) in config::read_only_report_paths() {
             if let Some(target) = read_target(path, description)? {
                 targets.push(target);
-            }
-        }
-
-        let system_volumes = PathBuf::from("/System/Volumes");
-        if system_volumes.is_dir() {
-            for entry in std::fs::read_dir(&system_volumes)
-                .with_context(|| format!("read {}", system_volumes.display()))?
-            {
-                let path = entry?.path();
-                if let Some(target) = read_target(path, "System volume (read-only)")? {
-                    targets.push(target);
-                }
             }
         }
         targets.sort_by_key(|target| std::cmp::Reverse(target.size_bytes));
@@ -61,7 +46,7 @@ impl ReportOnly for ProtectedSystemReport {
     }
 
     fn advice(&self) -> &'static str {
-        "Read-only system report. Use macOS system tools; cleanrs will never delete these paths."
+        config::read_only_advice()
     }
 }
 
