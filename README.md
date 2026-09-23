@@ -29,6 +29,25 @@ architecture-specific binary from the latest versioned GitHub release:
 The formula verifies the release checksum and installs the cleanrs binary into
 the normal Homebrew prefix; Rust is not required on the user's machine.
 
+## Install with curl (when Homebrew requires newer Xcode tools)
+
+If Homebrew blocks the install because the Command Line Tools are outdated,
+use the user-local installer instead. It downloads the architecture-specific
+prebuilt binary, verifies its SHA-256 checksum, and does not require Rust,
+Homebrew, Xcode, or `sudo`:
+
+    curl -fsSL https://raw.githubusercontent.com/ho-doan/my-cleaner/master/scripts/install.sh | sh
+    export PATH="$HOME/.local/bin:$PATH"
+    cleanrs tui
+
+The installer supports Apple Silicon and Intel Macs. Set
+`CLEANRS_INSTALL_DIR` if a different user-writable installation directory is
+needed.
+
+## License
+
+cleanrs is released under the [MIT License](LICENSE).
+
 The clean command is a preview by default. Cleaning never runs unless --yes is
 present. Rules invoke the package manager's own cleanup command instead of
 deleting its internal files directly.
