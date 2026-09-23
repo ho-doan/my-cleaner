@@ -1,4 +1,4 @@
-use super::home_path;
+use super::{app_leftovers, home_path};
 use crate::model::{Category, CleanMethod, CleanTarget, RiskLevel};
 use crate::scanner::dir_size;
 use crate::Cleaner;
@@ -82,6 +82,9 @@ fn append_children(
 
     for entry in std::fs::read_dir(root).with_context(|| format!("read {}", root.display()))? {
         let entry = entry?;
+        if app_leftovers::is_orphaned_path(&entry.path()) {
+            continue;
+        }
         let name = entry.file_name();
         if excluded_names
             .iter()

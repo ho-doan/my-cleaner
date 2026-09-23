@@ -1,4 +1,5 @@
 pub mod agent_cache;
+pub mod app_leftovers;
 pub mod brew;
 pub mod cargo;
 pub mod claude;

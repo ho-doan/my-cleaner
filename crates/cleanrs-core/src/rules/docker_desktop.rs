@@ -1,4 +1,4 @@
-use super::home_path;
+use super::{app_leftovers, home_path};
 use crate::model::{Category, CleanMethod, CleanTarget, RiskLevel};
 use crate::scanner::dir_size;
 use crate::Cleaner;
@@ -24,7 +24,8 @@ impl Cleaner for DockerDesktopCleaner {
     }
 
     fn is_available(&self) -> bool {
-        docker_raw_path().is_some_and(|path| path.is_file())
+        app_leftovers::is_app_installed("docker-desktop")
+            && docker_raw_path().is_some_and(|path| path.is_file())
     }
 
     fn scan(&self) -> Result<Vec<CleanTarget>> {

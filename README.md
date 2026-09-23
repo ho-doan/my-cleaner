@@ -105,6 +105,16 @@ mode; cleanup processes never inherit the TUI's stdin.
 Docker cleanup is Manual-risk because the official prune command also removes
 unused volumes; it requires both --yes and --force.
 
+When a supported macOS app has been removed but its user data remains, the
+`Uninstalled app leftovers` rule reports the known data paths as separate
+Manual-review targets. It currently covers Docker Desktop, Visual Studio Code,
+Cursor (including versioned `ShipIt` updater caches), Postman, Slack, and
+Discord. The rule only activates when the corresponding `.app` bundle is
+absent, uses Trash-safe path cleanup, and never guesses at arbitrary
+`~/Library` directories. Docker's container data, including `Docker.raw`, is
+therefore still visible after Docker Desktop is uninstalled without being
+silently treated as a normal cache.
+
 Agent session/history data and Ollama models are treated as Manual-risk. Ollama
 models are removed through the official ollama rm command, never by deleting
 the model store directly. Active Codex and Claude runtimes are preserved.

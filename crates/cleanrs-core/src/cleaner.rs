@@ -84,6 +84,7 @@ pub fn all_cleaners() -> Vec<Box<dyn Cleaner>> {
         Box::new(rules::kiro::KiroCleaner),
         Box::new(rules::ollama::OllamaCleaner),
         Box::new(rules::docker_desktop::DockerDesktopCleaner),
+        Box::new(rules::app_leftovers::AppLeftoverCleaner),
         Box::new(rules::personal::PersonalDataCleaner),
         Box::new(rules::simulator::SimulatorUnavailableCleaner),
         Box::new(rules::xcode::XcodeCleaner),
