@@ -804,7 +804,7 @@ fn render(frame: &mut Frame, app: &App) {
         .constraints([
             Constraint::Length(5),
             Constraint::Min(6),
-            Constraint::Length(4),
+            Constraint::Length(5),
         ])
         .split(frame.area());
 
@@ -893,11 +893,26 @@ fn render(frame: &mut Frame, app: &App) {
         render_targets(frame, app, body[1]);
     }
 
-    let footer = footer_text(app);
+    let footer_color = match app.mode {
+        Mode::Scanning => Color::Cyan,
+        Mode::Reviewing => Color::Green,
+        Mode::Confirming => Color::Yellow,
+        Mode::Cleaning => Color::Magenta,
+    };
     frame.render_widget(
-        Paragraph::new(footer)
+        Paragraph::new(footer_lines(app))
             .wrap(Wrap { trim: true })
-            .block(Block::default().borders(Borders::ALL)),
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Status / shortcuts ")
+                    .title_style(
+                        Style::default()
+                            .fg(footer_color)
+                            .add_modifier(Modifier::BOLD),
+                    )
+                    .border_style(Style::default().fg(footer_color)),
+            ),
         vertical[2],
     );
     if matches!(app.mode, Mode::Confirming) {
@@ -1441,29 +1456,192 @@ fn render_targets(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     frame.render_stateful_widget(list, area, &mut state);
 }
 
-fn footer_text(app: &App) -> String {
+fn footer_lines(app: &App) -> Vec<Line<'static>> {
     match app.mode {
-        Mode::Scanning => "Scanning in background…  [q] quit".to_owned(),
+        Mode::Scanning => vec![
+            footer_line(
+                "STATUS",
+                vec![Span::styled(
+                    format!(
+                        "Scanning cleaners · {}/{}",
+                        app.received_scans, app.expected_scans
+                    ),
+                    Style::default().fg(Color::Cyan),
+                )],
+            ),
+            footer_line(
+                "MODE",
+                vec![Span::styled(
+                    "Background scan · results stream in",
+                    Style::default().fg(Color::Gray),
+                )],
+            ),
+            footer_line("KEYS", vec![footer_key("q"), Span::raw(" Quit")]),
+        ],
         Mode::Reviewing => {
             if app.show_full_disk {
-                if app.explorer_deleting {
-                    return "Moving item to Trash in background… [q] quit".to_owned();
-                }
                 if app.directory_scanning {
-                    return "Scanning folder in background… [b] back  [q] quit".to_owned();
+                    return vec![
+                        footer_line(
+                            "STATUS",
+                            vec![Span::styled(
+                                "Scanning folder · Git/status and sizes",
+                                Style::default().fg(Color::Yellow),
+                            )],
+                        ),
+                        footer_line(
+                            "MODE",
+                            vec![Span::styled(
+                                "Background scan",
+                                Style::default().fg(Color::Gray),
+                            )],
+                        ),
+                        footer_line(
+                            "KEYS",
+                            vec![
+                                footer_key("b"),
+                                Span::raw(" Back   "),
+                                footer_key("q"),
+                                Span::raw(" Quit"),
+                            ],
+                        ),
+                    ];
                 }
                 if app.directory_scan.is_some() {
-                    return "Directory explorer: [↑/↓] move  [enter] open  [x] Trash item  [b] back  [f] root scan  [q] quit"
-                        .to_owned();
+                    return vec![
+                        footer_line(
+                            "STATUS",
+                            vec![Span::styled(
+                                format!("Explorer · {} entries", app.directory_entries().len()),
+                                Style::default().fg(Color::Green),
+                            )],
+                        ),
+                        footer_line(
+                            "MODE",
+                            vec![
+                                Span::styled(
+                                    "Folder navigation   ",
+                                    Style::default().fg(Color::Gray),
+                                ),
+                                footer_key("Enter"),
+                                Span::raw(" Open   "),
+                                footer_key("x"),
+                                Span::raw(" Trash"),
+                            ],
+                        ),
+                        footer_line(
+                            "KEYS",
+                            vec![
+                                footer_key("↑↓"),
+                                Span::raw(" Move   "),
+                                footer_key("b"),
+                                Span::raw(" Back   "),
+                                footer_key("f"),
+                                Span::raw(" Root   "),
+                                footer_key("q"),
+                                Span::raw(" Quit"),
+                            ],
+                        ),
+                    ];
                 }
-                return "Full-disk inventory: [↑/↓] choose  [enter] open  [b] back to targets  [f] rescan  [q] quit"
-                    .to_owned();
+                let status = if app.full_disk_scanning {
+                    "Full-disk inventory · scanning root + HOME".to_owned()
+                } else {
+                    format!(
+                        "Full-disk inventory · {} entries",
+                        app.full_disk_entries().len()
+                    )
+                };
+                return vec![
+                    footer_line(
+                        "STATUS",
+                        vec![Span::styled(
+                            status,
+                            Style::default().fg(if app.full_disk_scanning {
+                                Color::Yellow
+                            } else {
+                                Color::Green
+                            }),
+                        )],
+                    ),
+                    footer_line(
+                        "MODE",
+                        vec![
+                            Span::styled("Inventory   ", Style::default().fg(Color::Gray)),
+                            footer_key("Enter"),
+                            Span::raw(" Open   "),
+                            footer_key("b"),
+                            Span::raw(" Targets"),
+                        ],
+                    ),
+                    footer_line(
+                        "KEYS",
+                        vec![
+                            footer_key("↑↓"),
+                            Span::raw(" Choose   "),
+                            footer_key("f"),
+                            Span::raw(" Rescan   "),
+                            footer_key("q"),
+                            Span::raw(" Quit"),
+                        ],
+                    ),
+                ];
             }
-            let action = app.last_action.as_deref().unwrap_or("Ready for review");
-            format!(
-                "{action}
-[↑/↓] move  [space] toggle  [a] select Safe  [d] dry-run  [r] reload  [f] full disk  [enter] continue  [q] quit"
-            )
+            let status = app
+                .last_action
+                .as_deref()
+                .map(|action| shorten(action, 58))
+                .unwrap_or_else(|| {
+                    format!(
+                        "Ready · {} selected · {}",
+                        app.selected_count(),
+                        format_size(app.selected_size(), DECIMAL)
+                    )
+                });
+            vec![
+                footer_line(
+                    "STATUS",
+                    vec![Span::styled(status, Style::default().fg(Color::Green))],
+                ),
+                footer_line(
+                    "MODE",
+                    vec![
+                        Span::styled(
+                            if app.dry_run {
+                                "DRY-RUN · no files will change   "
+                            } else {
+                                "EXECUTE · targets will be processed   "
+                            },
+                            Style::default().fg(if app.dry_run {
+                                Color::Cyan
+                            } else {
+                                Color::Yellow
+                            }),
+                        ),
+                        footer_key("d"),
+                        Span::raw(" Mode   "),
+                        footer_key("Enter"),
+                        Span::raw(" Continue"),
+                    ],
+                ),
+                footer_line(
+                    "KEYS",
+                    vec![
+                        footer_key("↑↓"),
+                        Span::raw(" Move "),
+                        footer_key("Space"),
+                        Span::raw(" Sel "),
+                        footer_key("a"),
+                        Span::raw(" Safe "),
+                        footer_key("r"),
+                        Span::raw(" Reload "),
+                        footer_key("f"),
+                        Span::raw(" Full "),
+                        footer_key("q"),
+                        Span::raw(" Quit"),
+                    ],
+                ),
+            ]
         }
         Mode::Confirming => {
             if let Some(target) = &app.pending_explorer_delete {
@@ -1472,33 +1650,182 @@ fn footer_text(app: &App) -> String {
                 } else {
                     "file"
                 };
-                format!(
-                    "Move {} {} ({}) to Trash? [y] confirm  [n] cancel  [esc] cancel",
-                    item_kind,
-                    target.path.display(),
-                    format_size(target.size_bytes, DECIMAL)
-                )
+                vec![
+                    footer_line(
+                        "STATUS",
+                        vec![Span::styled(
+                            format!(
+                                "Move {item_kind} to Trash · {}",
+                                format_size(target.size_bytes, DECIMAL)
+                            ),
+                            Style::default().fg(Color::Red),
+                        )],
+                    ),
+                    footer_line(
+                        "MODE",
+                        vec![Span::styled(
+                            "Recoverable via macOS Trash",
+                            Style::default().fg(Color::Gray),
+                        )],
+                    ),
+                    footer_line(
+                        "KEYS",
+                        vec![
+                            footer_key("y"),
+                            Span::raw(" Confirm   "),
+                            footer_key("n/Esc"),
+                            Span::raw(" Cancel"),
+                        ],
+                    ),
+                ]
             } else if app.has_manual_selection() && !app.dry_run {
-                format!(
-                    "Docker/manual selected. Type FORCE then [enter] to execute, [n] cancel. Current: {}",
-                    app.confirm_text
-                )
+                let input = if app.confirm_text.is_empty() {
+                    "_____".to_owned()
+                } else {
+                    app.confirm_text.clone()
+                };
+                vec![
+                    footer_line(
+                        "STATUS",
+                        vec![Span::styled(
+                            format!(
+                                "Manual-risk · {} selected · {}",
+                                app.selected_count(),
+                                format_size(app.selected_size(), DECIMAL)
+                            ),
+                            Style::default().fg(Color::Red),
+                        )],
+                    ),
+                    footer_line(
+                        "INPUT",
+                        vec![
+                            Span::styled("Type FORCE: ", Style::default().fg(Color::Yellow)),
+                            Span::styled(
+                                format!("[{input}]"),
+                                Style::default()
+                                    .fg(Color::Yellow)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                        ],
+                    ),
+                    footer_line(
+                        "KEYS",
+                        vec![
+                            footer_key("Enter"),
+                            Span::raw(" Execute   "),
+                            footer_key("n/Esc"),
+                            Span::raw(" Cancel"),
+                        ],
+                    ),
+                ]
             } else {
-                format!(
-                    "{} {} selected target(s)? [y] {}  [n] cancel",
-                    if app.dry_run { "Preview" } else { "Execute" },
-                    app.selected_count(),
-                    if app.dry_run {
-                        "preview only; no files changed"
-                    } else {
-                        "yes"
-                    }
-                )
+                vec![
+                    footer_line(
+                        "STATUS",
+                        vec![Span::styled(
+                            format!(
+                                "{} · {} selected · {}",
+                                if app.dry_run { "Preview" } else { "Execute" },
+                                app.selected_count(),
+                                format_size(app.selected_size(), DECIMAL)
+                            ),
+                            Style::default().fg(if app.dry_run {
+                                Color::Cyan
+                            } else {
+                                Color::Yellow
+                            }),
+                        )],
+                    ),
+                    footer_line(
+                        "MODE",
+                        vec![Span::styled(
+                            if app.dry_run {
+                                "No files will change"
+                            } else {
+                                "Selected targets will be processed"
+                            },
+                            Style::default().fg(Color::Gray),
+                        )],
+                    ),
+                    footer_line(
+                        "KEYS",
+                        vec![
+                            footer_key("y"),
+                            Span::raw(" Confirm   "),
+                            footer_key("n/Esc"),
+                            Span::raw(" Cancel"),
+                        ],
+                    ),
+                ]
             }
         }
-        Mode::Cleaning => format!(
-            "Cleaning {}/{} target(s) in background… [q] quit",
-            app.cleaning_completed, app.cleaning_total
-        ),
+        Mode::Cleaning => {
+            let completed = app.cleaning_completed;
+            let total = app.cleaning_total;
+            let percent = if total == 0 {
+                0
+            } else {
+                completed
+                    .saturating_mul(100)
+                    .checked_div(total)
+                    .unwrap_or(0)
+            };
+            vec![
+                footer_line(
+                    "STATUS",
+                    vec![Span::styled(
+                        if app.explorer_deleting {
+                            "Moving selected item to Trash…".to_owned()
+                        } else {
+                            format!("Cleaning {completed}/{total} targets")
+                        },
+                        Style::default().fg(Color::Magenta),
+                    )],
+                ),
+                footer_line(
+                    "PROGRESS",
+                    vec![Span::styled(
+                        format!("{percent}% · background operation"),
+                        Style::default().fg(Color::Gray),
+                    )],
+                ),
+                footer_line("KEYS", vec![footer_key("q"), Span::raw(" Quit")]),
+            ]
+        }
     }
+}
+
+fn footer_line(label: &str, mut content: Vec<Span<'static>>) -> Line<'static> {
+    let mut spans = vec![footer_label(label)];
+    spans.append(&mut content);
+    Line::from(spans)
+}
+
+fn footer_label(label: &str) -> Span<'static> {
+    Span::styled(
+        format!("{label:<8}"),
+        Style::default()
+            .fg(Color::Gray)
+            .add_modifier(Modifier::BOLD),
+    )
+}
+
+fn footer_key(key: &str) -> Span<'static> {
+    Span::styled(
+        format!("[{key}]"),
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )
+}
+
+fn shorten(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_owned();
+    }
+    let prefix = value
+        .chars()
+        .take(max_chars.saturating_sub(1))
+        .collect::<String>();
+    format!("{prefix}…")
 }
