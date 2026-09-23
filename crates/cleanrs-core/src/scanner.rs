@@ -257,6 +257,14 @@ fn git_context(path: &Path) -> (bool, bool) {
 
 fn directory_suggestion(path: &Path) -> Option<DirectorySuggestion> {
     let name = path.file_name()?.to_string_lossy();
+    if is_home_cocos_data(path) && matches!(name.as_ref(), "profiles" | "default") {
+        return Some(DirectorySuggestion {
+            reason: "Cocos local profile/config data; deleting resets local Cocos settings"
+                .to_owned(),
+            can_delete: true,
+        });
+    }
+
     let (reason, can_delete) = match name.as_ref() {
         "node_modules" => ("regenerable Node dependencies", true),
         "target" => ("Rust build artifacts", true),
@@ -282,6 +290,14 @@ fn directory_suggestion(path: &Path) -> Option<DirectorySuggestion> {
         reason: reason.to_owned(),
         can_delete,
     })
+}
+
+fn is_home_cocos_data(path: &Path) -> bool {
+    let Some(home) = std::env::var_os("HOME") else {
+        return false;
+    };
+    let cocos_root = PathBuf::from(home).join(".Cocos");
+    path.parent() == Some(cocos_root.as_path())
 }
 
 fn file_suggestion(path: &Path) -> Option<DirectorySuggestion> {
@@ -415,8 +431,8 @@ fn tolerant_dir_size(path: &Path) -> (u64, usize) {
 #[cfg(test)]
 mod tests {
     use super::{
-        dir_size, file_suggestion, is_protected_path, readonly_directory_entry, scan_directory,
-        scan_readonly_paths,
+        dir_size, directory_suggestion, file_suggestion, is_protected_path,
+        readonly_directory_entry, scan_directory, scan_readonly_paths,
     };
     use std::fs;
     use std::path::Path;
@@ -510,6 +526,24 @@ mod tests {
             .suggestion
             .as_ref()
             .is_some_and(|suggestion| !suggestion.can_delete));
+    }
+
+    #[test]
+    fn directory_scan_approves_only_known_home_cocos_folders() {
+        let Some(home) = std::env::var_os("HOME") else {
+            return;
+        };
+        let cocos = Path::new(&home).join(".Cocos");
+        let profiles = cocos.join("profiles");
+        let default = cocos.join("default");
+        let unrelated = Path::new("/tmp/project/profiles");
+
+        for path in [&profiles, &default] {
+            let suggestion = directory_suggestion(path).expect("known Cocos folder");
+            assert!(suggestion.can_delete);
+            assert!(suggestion.reason.contains("resets local Cocos settings"));
+        }
+        assert!(directory_suggestion(unrelated).is_none());
     }
 
     #[test]

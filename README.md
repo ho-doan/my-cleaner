@@ -145,6 +145,10 @@ an individual system-temp file under `/private/tmp` or `/private/var/tmp`, then
 press x to move it to Trash. System roots, mounted volumes, databases, swap,
 and sensitive folders remain review-only.
 
+The explorer also recognizes `~/.Cocos/profiles` and `~/.Cocos/default` as
+explicitly approved folder targets. They remain recoverable through Trash, but
+the row warns that deleting them resets local Cocos settings.
+
 Press g to open the global-tools inventory. It checks Cargo-installed binaries,
 Dart pub global, npm, pnpm, Yarn, uv, pipx, and Homebrew formula/cask when the
 corresponding command is available. Select a tool and press x or Enter to

@@ -468,15 +468,22 @@ fn selected_explorer_target(app: &App) -> Option<CleanTarget> {
         return None;
     }
 
+    let description = entry
+        .suggestion
+        .as_ref()
+        .map(|suggestion| suggestion.reason.clone())
+        .unwrap_or_else(|| {
+            if entry.is_dir {
+                "Approved suggested folder selected from the directory explorer".to_owned()
+            } else {
+                "File selected from the directory explorer".to_owned()
+            }
+        });
+
     Some(CleanTarget {
         path: entry.path.clone(),
         size_bytes: entry.size_bytes,
-        description: if entry.is_dir {
-            "Safe suggested folder selected from the directory explorer"
-        } else {
-            "File selected from the directory explorer"
-        }
-        .to_owned(),
+        description,
         method: CleanMethod::TrashPath,
     })
 }
@@ -660,7 +667,7 @@ fn run_loop(stdout: &mut Stdout) -> Result<()> {
                                 app.mode = Mode::Confirming;
                             } else {
                                 app.last_action = Some(
-                                    "Only approved files or safe suggested folders can be moved to Trash"
+                                    "Only approved files or suggested folders can be moved to Trash"
                                         .to_owned(),
                                 );
                             }
@@ -1970,7 +1977,7 @@ fn render_directory(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         };
         items.push(ListItem::new(git_status));
         items.push(ListItem::new(
-            "Entries — Enter opens folders; [x] moves a file/safe suggested folder to Trash",
+            "Entries — Enter opens folders; [x] moves a file/approved suggested folder to Trash",
         ));
         let entry_start = items.len();
         if report.entries.is_empty() {
