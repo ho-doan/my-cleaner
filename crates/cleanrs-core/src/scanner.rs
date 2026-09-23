@@ -588,10 +588,10 @@ mod tests {
     #[test]
     fn protected_inventory_keeps_size_without_authorizing_root_deletion() {
         let root = tempdir().expect("temporary directory");
-        fs::write(root.path().join("large.cache"), vec![0_u8; 32])
-            .expect("write protected fixture");
+        let file = root.path().join("large.cache");
+        fs::write(&file, vec![0_u8; 32]).expect("write protected fixture");
 
-        let (entries, inaccessible) = scan_readonly_paths(&[root.path().to_path_buf()]);
+        let (entries, inaccessible) = scan_readonly_paths(&[file]);
 
         assert_eq!(inaccessible, 0);
         assert_eq!(entries[0].size_bytes, 32);

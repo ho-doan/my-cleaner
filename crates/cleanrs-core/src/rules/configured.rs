@@ -171,18 +171,28 @@ mod tests {
 
     #[test]
     fn parses_path_and_direct_command_rules() {
-        let rules = parse_rules(
+        let cache_path = if cfg!(target_os = "windows") {
+            "C:/tmp/cache"
+        } else {
+            "/tmp/cache"
+        };
+        let tool_data_path = if cfg!(target_os = "windows") {
+            "C:/tmp/tool-data"
+        } else {
+            "/tmp/tool-data"
+        };
+        let rules = parse_rules(&format!(
             r#"
                 [[rules]]
-                path = "/tmp/cache"
+                path = "{cache_path}"
                 description = "Temporary cache"
                 risk = "caution"
 
                 [[rules]]
-                path = "/tmp/tool-data"
+                path = "{tool_data_path}"
                 command = ["tool", "cache", "clean"]
-            "#,
-        )
+            "#
+        ))
         .expect("rules should parse");
 
         assert_eq!(rules.len(), 2);

@@ -312,7 +312,7 @@ mod tests {
             vec![
                 "cmd".to_owned(),
                 "/C".to_owned(),
-                "echo step-one & echo step-two 1>&2".to_owned(),
+                "echo step-one && echo step-two".to_owned(),
             ]
         } else {
             vec![
