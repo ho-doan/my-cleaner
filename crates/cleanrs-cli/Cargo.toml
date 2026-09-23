@@ -1,6 +1,6 @@
 [package]
 name = "cleanrs"
-version = "0.1.6"
+version = "0.1.7"
 edition = "2021"
 description = "Safe, rule-based disk cleanup for macOS and Windows"
 homepage = "https://github.com/ho-doan/my-cleaner"
