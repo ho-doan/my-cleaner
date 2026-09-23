@@ -28,6 +28,13 @@ case "$(uname -m)" in
     ;;
 esac
 
+for command in curl shasum tar install mkdir mktemp grep sleep awk; do
+  if ! command -v "$command" >/dev/null 2>&1; then
+    echo "Required command not found: ${command}" >&2
+    exit 1
+  fi
+done
+
 # Keep the checksum map explicit so a release cannot be installed unless its
 # artifact has been reviewed and added here.
 case "${VERSION}:${TARGET}" in
@@ -50,18 +57,42 @@ case "${VERSION}:${TARGET}" in
     EXPECTED_SHA256="559fab41ec179eb26aeb31875f7c4cc6f8ecba686e8e1454d0d81b3c307a9206"
     ;;
   *)
-    echo "No verified checksum is available for cleanrs ${VERSION} (${TARGET})." >&2
+    RETRY_DIR="$(mktemp -d "${TMPDIR:-/tmp}/cleanrs-installer-refresh.XXXXXX")"
+    RETRY_ATTEMPTS=6
+    retry_attempt=1
+    while [ "$retry_attempt" -le "$RETRY_ATTEMPTS" ]; do
+      case "$retry_attempt" in
+        1) retry_delay=2 ;;
+        2) retry_delay=4 ;;
+        *) retry_delay=8 ;;
+      esac
+      echo "Waiting for installer CDN to publish cleanrs ${VERSION} checksum (${retry_attempt}/${RETRY_ATTEMPTS})..." >&2
+      sleep "$retry_delay"
+      refreshed_script="${RETRY_DIR}/install.sh"
+      if curl --fail --silent --show-error --location --retry 2 \
+        --proto '=https' --tlsv1.2 \
+        -H 'Cache-Control: no-cache' -H 'Pragma: no-cache' \
+        --output "$refreshed_script" \
+        "https://raw.githubusercontent.com/${REPOSITORY}/master/scripts/install.sh?version=${VERSION}&attempt=${retry_attempt}" \
+        && grep -A1 -Fq "  ${VERSION}:${TARGET})" "$refreshed_script" \
+        && grep -A1 -F "  ${VERSION}:${TARGET})" "$refreshed_script" | grep -Eq 'EXPECTED_SHA256="[^"]+"'
+      then
+        if CLEANRS_VERSION="$VERSION" CLEANRS_INSTALL_DIR="$INSTALL_DIR" sh "$refreshed_script"; then
+          refreshed_status=0
+        else
+          refreshed_status=$?
+        fi
+        rm -rf "$RETRY_DIR"
+        exit "$refreshed_status"
+      fi
+      retry_attempt=$((retry_attempt + 1))
+    done
+    rm -rf "$RETRY_DIR"
+    echo "No verified checksum is available for cleanrs ${VERSION} (${TARGET}) after waiting for the installer CDN." >&2
     echo "Use a released version or set CLEANRS_VERSION after its checksum is published." >&2
     exit 1
     ;;
 esac
-
-for command in curl shasum tar install mkdir mktemp; do
-  if ! command -v "$command" >/dev/null 2>&1; then
-    echo "Required command not found: ${command}" >&2
-    exit 1
-  fi
-done
 
 ARCHIVE="cleanrs-v${VERSION}-${TARGET}.tar.gz"
 DOWNLOAD_URL="https://github.com/${REPOSITORY}/releases/download/v${VERSION}/${ARCHIVE}"

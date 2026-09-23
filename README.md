@@ -54,7 +54,9 @@ current/latest versions and the footer enables `u`. Pressing `u` closes the
 TUI first, then upgrades through the detected installation channel:
 
 - Homebrew installs run `brew update` and `brew upgrade`.
-- curl installs rerun the HTTPS installer with the verified latest version.
+- curl installs rerun the HTTPS installer with the verified latest version; the
+  installer waits and retries while GitHub's release metadata and checksum map
+  propagate through the CDN.
 
 If the network check fails, cleanup remains usable and no upgrade is attempted.
 There is no automatic upgrade.

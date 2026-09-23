@@ -1,7 +1,10 @@
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
+use std::io::Write;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::thread::sleep;
+use std::time::Duration;
 
 const RELEASES_API: &str = "https://api.github.com/repos/ho-doan/my-cleaner/releases/latest";
 const INSTALL_SCRIPT: &str =
@@ -88,16 +91,116 @@ pub fn perform_upgrade(update: &UpdateInfo) -> Result<()> {
     let install_dir = executable
         .parent()
         .context("running cleanrs executable has no parent directory")?;
-    let installer_command = format!("curl -fsSL --proto '=https' --tlsv1.2 {INSTALL_SCRIPT} | sh");
-    let status = Command::new("sh")
-        .arg("-c")
-        .arg(installer_command)
-        .env("CLEANRS_VERSION", &update.latest_version)
+    let installer_script = wait_for_installer_script(&update.latest_version)?;
+    run_installer_script(&installer_script, &update.latest_version, install_dir)
+}
+
+const INSTALLER_READY_ATTEMPTS: usize = 6;
+
+fn wait_for_installer_script(version: &str) -> Result<String> {
+    let target = current_release_target()?;
+    for attempt in 1..=INSTALLER_READY_ATTEMPTS {
+        match fetch_installer_script(version, attempt) {
+            Ok(script) if installer_script_has_checksum(&script, version, target) => {
+                if attempt > 1 {
+                    eprintln!("Installer CDN is ready for cleanrs {version}.");
+                }
+                return Ok(script);
+            }
+            Ok(_) => {
+                eprintln!(
+                    "Waiting for installer CDN to publish the cleanrs {version} checksum ({attempt}/{INSTALLER_READY_ATTEMPTS})…"
+                );
+            }
+            Err(error) => {
+                eprintln!(
+                    "Installer CDN is not ready ({attempt}/{INSTALLER_READY_ATTEMPTS}): {error}"
+                );
+            }
+        }
+
+        if attempt < INSTALLER_READY_ATTEMPTS {
+            let delay_seconds = 2_u64.pow((attempt.saturating_sub(1).min(3)) as u32);
+            sleep(Duration::from_secs(delay_seconds));
+        }
+    }
+
+    bail!(
+        "installer CDN did not publish a verified checksum for cleanrs {version} ({target}) after {INSTALLER_READY_ATTEMPTS} attempts"
+    )
+}
+
+fn fetch_installer_script(version: &str, attempt: usize) -> Result<String> {
+    let cache_busted_url = format!("{INSTALL_SCRIPT}?version={version}&attempt={attempt}");
+    let output = Command::new("curl")
+        .args([
+            "--fail",
+            "--silent",
+            "--show-error",
+            "--location",
+            "--max-time",
+            "10",
+            "--retry",
+            "2",
+            "--proto",
+            "=https",
+            "--tlsv1.2",
+            "-H",
+            "Cache-Control: no-cache",
+            "-H",
+            "Pragma: no-cache",
+            cache_busted_url.as_str(),
+        ])
+        .output()
+        .context("start installer CDN check")?;
+    if !output.status.success() {
+        bail!("installer CDN request exited with status {}", output.status);
+    }
+    String::from_utf8(output.stdout).context("installer CDN returned non-UTF-8 script")
+}
+
+fn current_release_target() -> Result<&'static str> {
+    match std::env::consts::ARCH {
+        "aarch64" => Ok("aarch64-apple-darwin"),
+        "x86_64" => Ok("x86_64-apple-darwin"),
+        architecture => bail!("unsupported macOS architecture for upgrade: {architecture}"),
+    }
+}
+
+fn installer_script_has_checksum(script: &str, version: &str, target: &str) -> bool {
+    let case_entry = format!("{version}:{target})");
+    let mut lines = script.lines();
+    while let Some(line) = lines.next() {
+        if line.trim() == case_entry {
+            return lines.next().is_some_and(|checksum| {
+                checksum.contains("EXPECTED_SHA256=") && !checksum.contains("\"\"")
+            });
+        }
+    }
+    false
+}
+
+fn run_installer_script(script: &str, version: &str, install_dir: &Path) -> Result<()> {
+    let mut child = Command::new("sh")
+        .arg("-s")
+        .stdin(Stdio::piped())
+        .env("CLEANRS_VERSION", version)
         .env("CLEANRS_INSTALL_DIR", install_dir)
-        .status()
-        .context("start curl installer")?;
+        .spawn()
+        .context("start verified curl installer")?;
+
+    let mut stdin = child
+        .stdin
+        .take()
+        .context("open stdin for verified curl installer")?;
+    stdin
+        .write_all(script.as_bytes())
+        .context("send verified installer script")?;
+    drop(stdin);
+
+    let status = child.wait().context("wait for curl installer")?;
     if !status.success() {
-        anyhow::bail!("curl installer exited with status {status}");
+        bail!("curl installer exited with status {status}");
     }
     Ok(())
 }
@@ -156,7 +259,7 @@ fn compare_versions(left: &str, right: &str) -> std::cmp::Ordering {
 
 #[cfg(test)]
 mod tests {
-    use super::{compare_versions, normalize_version};
+    use super::{compare_versions, installer_script_has_checksum, normalize_version};
     use std::cmp::Ordering;
 
     #[test]
@@ -170,5 +273,31 @@ mod tests {
         assert_eq!(compare_versions("0.1.4", "0.1.3"), Ordering::Greater);
         assert_eq!(compare_versions("0.1.3", "0.1.3"), Ordering::Equal);
         assert_eq!(compare_versions("1.0", "0.99.9"), Ordering::Greater);
+    }
+
+    #[test]
+    fn installer_readiness_requires_a_non_empty_target_checksum() {
+        let script = r#"
+            0.1.5:aarch64-apple-darwin)
+              EXPECTED_SHA256="abc123"
+            0.1.5:x86_64-apple-darwin)
+              EXPECTED_SHA256=""
+        "#;
+
+        assert!(installer_script_has_checksum(
+            script,
+            "0.1.5",
+            "aarch64-apple-darwin"
+        ));
+        assert!(!installer_script_has_checksum(
+            script,
+            "0.1.5",
+            "x86_64-apple-darwin"
+        ));
+        assert!(!installer_script_has_checksum(
+            script,
+            "0.1.6",
+            "aarch64-apple-darwin"
+        ));
     }
 }
