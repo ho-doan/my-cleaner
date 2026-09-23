@@ -19,15 +19,15 @@ Code, Kiro CLI, Ollama, and other known cache locations).
 
 ## Install with Homebrew
 
-The repository includes a Homebrew formula that builds cleanrs from the
-versioned source tag:
+The repository includes a Homebrew formula that installs the prebuilt
+architecture-specific binary from the latest versioned GitHub release:
 
     brew tap ho-doan/my-cleaner https://github.com/ho-doan/my-cleaner.git
     brew install ho-doan/my-cleaner/cleanrs
     cleanrs tui
 
-The formula uses Homebrew's Rust build dependency and installs the cleanrs
-binary into the normal Homebrew prefix.
+The formula verifies the release checksum and installs the cleanrs binary into
+the normal Homebrew prefix; Rust is not required on the user's machine.
 
 The clean command is a preview by default. Cleaning never runs unless --yes is
 present. Rules invoke the package manager's own cleanup command instead of
