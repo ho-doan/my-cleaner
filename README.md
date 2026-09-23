@@ -44,6 +44,23 @@ The installer supports Apple Silicon and Intel Macs. Set
 `CLEANRS_INSTALL_DIR` if a different user-writable installation directory is
 needed.
 
+## Uninstall
+
+For the curl installer, remove only the cleanrs binary:
+
+    rm -f "$HOME/.local/bin/cleanrs"
+
+If you added `$HOME/.local/bin` to `.zshrc`, remove that PATH line separately.
+Do not remove the whole directory because it may contain other user binaries.
+
+For Homebrew:
+
+    brew uninstall ho-doan/my-cleaner/cleanrs
+
+Removing the tap is optional:
+
+    brew untap ho-doan/my-cleaner
+
 ## License
 
 cleanrs is released under the [MIT License](LICENSE).
