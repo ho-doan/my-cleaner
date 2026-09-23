@@ -267,6 +267,12 @@ fn directory_suggestion(path: &Path, allowlisted: bool) -> Option<DirectorySugge
             can_delete: true,
         });
     }
+    if is_download_item(path) {
+        return Some(DirectorySuggestion {
+            reason: "item inside Downloads; move to Trash after confirmation".to_owned(),
+            can_delete: true,
+        });
+    }
 
     let (reason, can_delete) = match name.as_ref() {
         "node_modules" => ("regenerable Node dependencies", true),
@@ -297,6 +303,12 @@ fn directory_suggestion(path: &Path, allowlisted: bool) -> Option<DirectorySugge
 
 fn file_suggestion(path: &Path) -> Option<DirectorySuggestion> {
     let name = path.file_name()?.to_string_lossy();
+    if is_download_item(path) {
+        return Some(DirectorySuggestion {
+            reason: "file inside Downloads; move to Trash after confirmation".to_owned(),
+            can_delete: true,
+        });
+    }
     if path.starts_with(Path::new("/cores")) && (name == "core" || name.starts_with("core.")) {
         return Some(DirectorySuggestion {
             reason: "crash dump; keep only if it is still needed for debugging".to_owned(),
@@ -321,6 +333,14 @@ fn file_suggestion(path: &Path) -> Option<DirectorySuggestion> {
         reason: reason.to_owned(),
         can_delete: false,
     })
+}
+
+fn is_download_item(path: &Path) -> bool {
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return false;
+    };
+    let downloads = home.join("Downloads");
+    path.starts_with(&downloads) && path != downloads
 }
 
 fn excluded_root_paths(root: &Path) -> Vec<PathBuf> {
@@ -558,6 +578,21 @@ mod tests {
         assert_eq!(inaccessible, 0);
         assert_eq!(entry.size_bytes, 17);
         assert!(entry.read_only);
+    }
+
+    #[test]
+    fn downloads_items_are_explicitly_deletable() {
+        let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
+            return;
+        };
+        let downloads = home.join("Downloads");
+        let file = file_suggestion(&downloads.join("old.zip")).expect("Downloads file");
+        let folder =
+            directory_suggestion(&downloads.join("old-folder"), false).expect("Downloads folder");
+
+        assert!(file.can_delete);
+        assert!(folder.can_delete);
+        assert!(directory_suggestion(&downloads, false).is_none());
     }
 
     #[test]

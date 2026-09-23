@@ -178,6 +178,11 @@ directory an approved suggestion; it never deletes anything by itself, and
 `x` plus the Trash confirmation are still required. Press `w` again to remove
 the path from the allowlist.
 
+Items inside `~/Downloads` are treated as explicit user-approved cleanup
+candidates: files and folders can be moved to Trash with `x` and confirmation.
+The `Downloads` directory itself is never auto-approved, and cleanrs never
+selects or deletes Downloads items in bulk.
+
 Press g to open the global-tools inventory. It checks Cargo-installed binaries,
 Dart pub global, npm, pnpm, Yarn, uv, pipx, and Homebrew formula/cask when the
 corresponding command is available. Select a tool and press x or Enter to
