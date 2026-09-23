@@ -3,6 +3,8 @@ name = "cleanrs"
 version = "0.1.0"
 edition = "2021"
 description = "Safe, rule-based disk cleanup for macOS"
+homepage = "https://github.com/ho-doan/my-cleaner"
+repository = "https://github.com/ho-doan/my-cleaner"
 license = "MIT"
 
 [dependencies]

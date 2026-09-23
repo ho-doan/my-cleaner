@@ -17,6 +17,18 @@ Code, Kiro CLI, Ollama, and other known cache locations).
     cargo run -p cleanrs -- clean --only docker --yes --force
     cargo run -p cleanrs -- scan --only codex,claude,kiro,ollama,agent-caches
 
+## Install with Homebrew
+
+The repository includes a Homebrew formula that builds cleanrs from the
+versioned source tag:
+
+    brew tap ho-doan/my-cleaner https://github.com/ho-doan/my-cleaner.git
+    brew install ho-doan/my-cleaner/cleanrs
+    cleanrs tui
+
+The formula uses Homebrew's Rust build dependency and installs the cleanrs
+binary into the normal Homebrew prefix.
+
 The clean command is a preview by default. Cleaning never runs unless --yes is
 present. Rules invoke the package manager's own cleanup command instead of
 deleting its internal files directly.
