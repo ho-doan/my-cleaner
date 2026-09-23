@@ -31,6 +31,12 @@ esac
 # Keep the checksum map explicit so a release cannot be installed unless its
 # artifact has been reviewed and added here.
 case "${VERSION}:${TARGET}" in
+  0.1.4:aarch64-apple-darwin)
+    EXPECTED_SHA256="8990b85b1e61ad61f06c1c334a8942a09abd71e0f65f482f45c4c670ed7b7449"
+    ;;
+  0.1.4:x86_64-apple-darwin)
+    EXPECTED_SHA256="bb4ba3ba319a99f1c7132dc834995f6ddbfd78cbe0f923c7e4e3bd8f0e2d174d"
+    ;;
   0.1.3:aarch64-apple-darwin)
     EXPECTED_SHA256="fb71f116f771bf17c89d5e53a7f65cc515b4fa98b4836eccae9dc88982207bd7"
     ;;

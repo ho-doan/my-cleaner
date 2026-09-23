@@ -4,11 +4,11 @@ class Cleanrs < Formula
   license "MIT"
 
   if Hardware::CPU.arm?
-    url "https://github.com/ho-doan/my-cleaner/releases/download/v0.1.3/cleanrs-v0.1.3-aarch64-apple-darwin.tar.gz"
-    sha256 "fb71f116f771bf17c89d5e53a7f65cc515b4fa98b4836eccae9dc88982207bd7"
+    url "https://github.com/ho-doan/my-cleaner/releases/download/v0.1.4/cleanrs-v0.1.4-aarch64-apple-darwin.tar.gz"
+    sha256 "8990b85b1e61ad61f06c1c334a8942a09abd71e0f65f482f45c4c670ed7b7449"
   else
-    url "https://github.com/ho-doan/my-cleaner/releases/download/v0.1.3/cleanrs-v0.1.3-x86_64-apple-darwin.tar.gz"
-    sha256 "559fab41ec179eb26aeb31875f7c4cc6f8ecba686e8e1454d0d81b3c307a9206"
+    url "https://github.com/ho-doan/my-cleaner/releases/download/v0.1.4/cleanrs-v0.1.4-x86_64-apple-darwin.tar.gz"
+    sha256 "bb4ba3ba319a99f1c7132dc834995f6ddbfd78cbe0f923c7e4e3bd8f0e2d174d"
   end
 
   def install
