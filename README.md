@@ -61,3 +61,8 @@ review the exact official uninstall command; y runs it in the background and
 the inventory reloads automatically. cleanrs never deletes a package-manager
 directory directly, and npm itself is shown as `KEEP` because it manages its
 own installation.
+
+Homebrew casks may require administrator authentication: run sudo -v in a
+separate Terminal first. cleanrs checks cached authentication without
+collecting or storing the password, so a missing credential fails clearly
+instead of leaving the TUI waiting on a hidden prompt.

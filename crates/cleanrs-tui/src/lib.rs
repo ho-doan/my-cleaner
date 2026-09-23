@@ -1172,6 +1172,15 @@ fn render_confirmation_modal(frame: &mut Frame, app: &App) {
         lines.push(Line::from(
             "This uses the package manager's official uninstall flow.",
         ));
+        if tool.requires_admin_authentication() {
+            lines.push(Line::from(Span::styled(
+                "Administrator password may be required.",
+                Style::default().fg(Color::Yellow),
+            )));
+            lines.push(Line::from(
+                "Run sudo -v in another Terminal first; cleanrs never captures passwords.",
+            ));
+        }
         lines.push(Line::from(
             "Check dependencies first; Homebrew may remove linked dependents.",
         ));
@@ -2050,7 +2059,11 @@ fn footer_lines(app: &App) -> Vec<Line<'static>> {
                     footer_line(
                         "MODE",
                         vec![Span::styled(
-                            "Manager command · check dependencies",
+                            if tool.requires_admin_authentication() {
+                                "Run sudo -v first if admin auth is needed"
+                            } else {
+                                "Manager command · check dependencies"
+                            },
                             Style::default().fg(Color::Gray),
                         )],
                     ),

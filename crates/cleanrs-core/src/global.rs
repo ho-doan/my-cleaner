@@ -112,6 +112,10 @@ impl GlobalTool {
             .collect::<Vec<_>>()
             .join(" ")
     }
+
+    pub fn requires_admin_authentication(&self) -> bool {
+        self.manager == GlobalToolManager::BrewCask
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -188,6 +192,19 @@ pub fn uninstall_global_tool(tool: &GlobalTool, dry_run: bool) -> Result<GlobalT
             success: true,
             message: format!("dry-run: would run {command_text}"),
         });
+    }
+
+    if tool.requires_admin_authentication() {
+        let auth_check = Command::new("sudo")
+            .args(["-n", "-v"])
+            .output()
+            .context("failed to check administrator authentication")?;
+        if !auth_check.status.success() {
+            bail!(
+                "{} needs administrator authentication. Run sudo -v in a separate Terminal window, then retry; cleanrs never captures passwords.",
+                command_text
+            );
+        }
     }
 
     let output = Command::new(tool.manager.binary())
@@ -536,5 +553,11 @@ mod tests {
         assert_eq!(args, ["uninstall", "--cask", "cursor"]);
         let tool = GlobalTool::new(GlobalToolManager::Uv, "ruff", Some("0.9.2".to_owned()));
         assert_eq!(tool.uninstall_command(), "uv tool uninstall ruff");
+        let cask = GlobalTool::new(
+            GlobalToolManager::BrewCask,
+            "visual-studio-code",
+            Some("1.125.1".to_owned()),
+        );
+        assert!(cask.requires_admin_authentication());
     }
 }
