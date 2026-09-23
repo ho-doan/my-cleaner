@@ -2,7 +2,7 @@
 
 set -eu
 
-VERSION="${CLEANRS_VERSION:-0.1.4}"
+VERSION="${CLEANRS_VERSION:-0.1.5}"
 INSTALL_DIR="${CLEANRS_INSTALL_DIR:-$HOME/.local/bin}"
 REPOSITORY="${CLEANRS_REPOSITORY:-ho-doan/my-cleaner}"
 
@@ -31,6 +31,12 @@ esac
 # Keep the checksum map explicit so a release cannot be installed unless its
 # artifact has been reviewed and added here.
 case "${VERSION}:${TARGET}" in
+  0.1.5:aarch64-apple-darwin)
+    EXPECTED_SHA256="2e152e8ea0166ec73904a25504f37aa1965815f00950b397fc92ef3a7001eb5a"
+    ;;
+  0.1.5:x86_64-apple-darwin)
+    EXPECTED_SHA256="c7e34a828eb66e7074b4d4d4a6f444d6cc496731d8f9d9ba35a837384b32d642"
+    ;;
   0.1.4:aarch64-apple-darwin)
     EXPECTED_SHA256="8990b85b1e61ad61f06c1c334a8942a09abd71e0f65f482f45c4c670ed7b7449"
     ;;
