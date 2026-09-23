@@ -1,13 +1,16 @@
 class Cleanrs < Formula
   desc "Safe, rule-based disk cleanup for macOS"
   homepage "https://github.com/ho-doan/my-cleaner"
-  url "https://github.com/ho-doan/my-cleaner/archive/refs/tags/v0.1.0.tar.gz"
   license "MIT"
 
-  depends_on "rust" => :build
+  if Hardware::CPU.arm?
+    url "https://github.com/ho-doan/my-cleaner/releases/download/v0.1.1/cleanrs-v0.1.1-aarch64-apple-darwin.tar.gz"
+  else
+    url "https://github.com/ho-doan/my-cleaner/releases/download/v0.1.1/cleanrs-v0.1.1-x86_64-apple-darwin.tar.gz"
+  end
 
   def install
-    system "cargo", "install", "--locked", "--path", "crates/cleanrs-cli", "--root", prefix
+    bin.install "cleanrs"
   end
 
   test do
