@@ -1,23 +1,20 @@
 # cleanrs
 
-cleanrs is a macOS-focused, rule-based disk cleanup tool. The first milestone
+cleanrs is a macOS- and Windows-focused, rule-based disk cleanup tool. The first milestone
 implements a read-only scan and command-backed cleanup for npm, Homebrew, pip,
 uv, Yarn, pnpm, Cargo, Docker, and common coding-agent caches (Codex, Claude
 Code, Kiro CLI, Ollama, and other known cache locations).
 
 The core now has explicit `platform/macos` and `platform/windows` configuration
-boundaries. The current public release remains macOS-only; Windows support is
-being built on the shared scanner, TUI, and cleanup model before a Windows
-installer is published.
+boundaries. The public `v0.1.6` release includes macOS and Windows binaries.
 
-The Windows installer is prepared for the next Windows release. On a supported
-release, install without Rust or Homebrew from PowerShell:
+Install the Windows binary without Rust or Homebrew from PowerShell:
 
     irm https://raw.githubusercontent.com/ho-doan/my-cleaner/master/scripts/install.ps1 | iex
 
 It installs a checksum-verified `cleanrs.exe` into the user profile and updates
-the user PATH. The current public release does not contain a Windows artifact
-yet.
+the user PATH. The installer supports Windows x64 and waits for the release
+checksum manifest to become available before installing.
 
 ## Usage
 

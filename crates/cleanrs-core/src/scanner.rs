@@ -474,10 +474,11 @@ fn tolerant_dir_size(path: &Path) -> (u64, usize) {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "macos")]
+    use super::is_protected_path;
     use super::{
-        config, dir_size, directory_suggestion, file_suggestion, is_protected_path,
-        readonly_directory_entry, scan_directory, scan_home_entries, scan_readonly_paths,
-        STANDARD_HOME_DIRECTORIES,
+        config, dir_size, directory_suggestion, file_suggestion, readonly_directory_entry,
+        scan_directory, scan_home_entries, scan_readonly_paths, STANDARD_HOME_DIRECTORIES,
     };
     use std::fs;
     use std::path::Path;
