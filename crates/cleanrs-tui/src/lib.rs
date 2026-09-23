@@ -523,6 +523,27 @@ fn selected_explorer_target(app: &App) -> Option<CleanTarget> {
     })
 }
 
+fn explorer_delete_rejection(app: &App) -> &'static str {
+    let Some(scan) = app.directory_scan.as_ref() else {
+        return "No explorer item selected";
+    };
+    let Some(entry) = scan.entries.get(app.directory_cursor) else {
+        return "No explorer item selected";
+    };
+    if entry.read_only {
+        "Read-only item · x disabled"
+    } else if entry.is_dir
+        && !entry
+            .suggestion
+            .as_ref()
+            .is_some_and(|suggestion| suggestion.can_delete)
+    {
+        "Folder not approved · x disabled"
+    } else {
+        "Review-only item · x disabled"
+    }
+}
+
 fn selected_explorer_path(app: &App) -> Option<PathBuf> {
     let scan = app.directory_scan.as_ref()?;
     scan.entries
@@ -715,10 +736,7 @@ fn run_loop(stdout: &mut Stdout, current_version: &str) -> Result<RunOutcome> {
                                 app.confirm_text.clear();
                                 app.mode = Mode::Confirming;
                             } else {
-                                app.last_action = Some(
-                                    "Only approved files or suggested folders can be moved to Trash"
-                                        .to_owned(),
-                                );
+                                app.last_action = Some(explorer_delete_rejection(&app).to_owned());
                             }
                         }
                         KeyAction::ToggleAllowlist => {
@@ -2500,12 +2518,23 @@ fn footer_lines(app: &App) -> Vec<Line<'static>> {
                     ];
                 }
                 if app.directory_scan.is_some() {
+                    let explorer_status = app
+                        .last_action
+                        .as_deref()
+                        .map(|action| format!("Explorer · {}", shorten(action, 48)))
+                        .unwrap_or_else(|| {
+                            format!("Explorer · {} entries", app.directory_entries().len())
+                        });
                     return vec![
                         footer_line(
                             "STATUS",
                             vec![Span::styled(
-                                format!("Explorer · {} entries", app.directory_entries().len()),
-                                Style::default().fg(Color::Green),
+                                explorer_status,
+                                Style::default().fg(if app.last_action.is_some() {
+                                    Color::Yellow
+                                } else {
+                                    Color::Green
+                                }),
                             )],
                         ),
                         footer_line(
