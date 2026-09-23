@@ -20,6 +20,15 @@ pub fn clean_target(cleaner_id: &str, target: &CleanTarget, dry_run: bool) -> Re
     )
 }
 
+#[tracing::instrument(
+    skip(target),
+    fields(
+        cleaner_id,
+        target = %target.path.display(),
+        dry_run = options.dry_run,
+        permanent = options.permanent
+    )
+)]
 pub fn clean_target_with_options(
     cleaner_id: &str,
     target: &CleanTarget,

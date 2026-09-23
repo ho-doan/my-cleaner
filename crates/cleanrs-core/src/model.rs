@@ -24,6 +24,7 @@ pub enum RiskLevel {
     Safe,
     Caution,
     Manual,
+    Destructive,
 }
 
 #[derive(Clone, Debug, Serialize)]

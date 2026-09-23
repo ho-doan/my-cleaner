@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use serde::Serialize;
 use std::fs::{create_dir_all, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -18,8 +19,18 @@ pub fn history_path() -> Option<PathBuf> {
     std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cleanrs/history.log"))
 }
 
-/// Append one tab-separated history entry. Fields are sanitized so a single
-/// operation cannot forge additional log rows.
+#[derive(Serialize)]
+struct HistoryEntry {
+    timestamp: u64,
+    operation: String,
+    actor: String,
+    target: String,
+    status: String,
+    detail: String,
+}
+
+/// Append one JSON-lines history entry. Newlines are normalized so one
+/// operation always occupies exactly one audit-log row.
 pub fn append_history_at(
     path: &Path,
     operation: &str,
@@ -40,16 +51,16 @@ pub fn append_history_at(
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    writeln!(
-        file,
-        "{}\t{}\t{}\t{}\t{}\t{}",
+    let entry = HistoryEntry {
         timestamp,
-        sanitize(operation),
-        sanitize(actor),
-        sanitize(target),
-        sanitize(status),
-        sanitize(detail)
-    )?;
+        operation: sanitize(operation),
+        actor: sanitize(actor),
+        target: sanitize(target),
+        status: sanitize(status),
+        detail: sanitize(detail),
+    };
+    serde_json::to_writer(&mut file, &entry)?;
+    writeln!(file)?;
     Ok(())
 }
 
@@ -88,7 +99,8 @@ mod tests {
 
         let contents = fs::read_to_string(path).expect("history should be readable");
         assert_eq!(contents.lines().count(), 1);
-        assert!(contents.contains("/tmp/cache forged"));
-        assert!(contents.contains("moved to trash"));
+        let entry: serde_json::Value = serde_json::from_str(contents.trim()).expect("JSONL");
+        assert_eq!(entry["target"], "/tmp/cache forged");
+        assert_eq!(entry["detail"], "moved to trash");
     }
 }

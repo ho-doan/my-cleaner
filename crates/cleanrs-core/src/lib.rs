@@ -9,6 +9,7 @@ pub mod executor;
 pub mod global;
 pub mod history;
 pub mod model;
+pub mod report;
 pub mod rules;
 pub mod scanner;
 
@@ -18,6 +19,7 @@ pub use global::{
     GlobalToolScan,
 };
 pub use model::{Category, CleanMethod, CleanOptions, CleanResult, CleanTarget, RiskLevel};
+pub use report::{all_reporters, scan_all_reports, ReadOnlyScan, ReadOnlyTarget, ReportOnly};
 pub use scanner::{
     can_delete_path, dir_size, full_disk_scan, is_protected_path, scan_directory, DirectoryScan,
     DirectoryScanEntry, DirectorySuggestion, DiskScanEntry, FullDiskScan,

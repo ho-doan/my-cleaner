@@ -1,8 +1,9 @@
 use anyhow::{bail, Result};
 use clap::{Args, Parser, Subcommand};
+use cleanrs_core::history::record_history;
 use cleanrs_core::{
-    all_cleaners, full_disk_scan, scan_all, CleanOptions, CleanResult, Cleaner, CleanerScan,
-    FullDiskScan,
+    all_cleaners, full_disk_scan, scan_all, scan_all_reports, CleanOptions, CleanResult, Cleaner,
+    CleanerScan, FullDiskScan, ReadOnlyScan, RiskLevel,
 };
 use comfy_table::{presets::UTF8_FULL, Table};
 use humansize::{format_size, DECIMAL};
@@ -23,9 +24,16 @@ enum Command {
     /// Preview or execute cleaning for selected cleaners.
     Clean(CleanArgs),
     /// List registered cleaners and whether their command is available.
-    List,
+    List(ListArgs),
     /// Open the interactive terminal UI.
     Tui,
+}
+
+#[derive(Debug, Args)]
+struct ListArgs {
+    /// List report-only system paths instead of cleaners.
+    #[arg(long)]
+    readonly: bool,
 }
 
 #[derive(Debug, Args)]
@@ -50,6 +58,9 @@ struct CleanArgs {
     /// Comma-separated cleaner IDs, for example: npm.
     #[arg(long, value_delimiter = ',')]
     only: Option<Vec<String>>,
+    /// Explicitly select every cleaner, including the destructive Trash row.
+    #[arg(long, conflicts_with = "only")]
+    all: bool,
     /// Explicitly keep this operation as a preview.
     #[arg(long)]
     dry_run: bool,
@@ -63,6 +74,9 @@ struct CleanArgs {
     /// Requires --yes and does not alter manager-owned commands.
     #[arg(long, requires = "yes", conflicts_with = "dry_run")]
     permanent: bool,
+    /// Exact confirmation required for Empty Trash.
+    #[arg(long, value_name = "EMPTY TRASH")]
+    confirm_destructive: Option<String>,
     /// Emit machine-readable JSON.
     #[arg(long)]
     json: bool,
@@ -73,16 +87,35 @@ struct CleanOutput {
     dry_run: bool,
     results: Vec<CleanResult>,
     errors: Vec<String>,
+    skipped_readonly_count: usize,
+    skipped_readonly_bytes: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct ScanOutput {
+    cleaners: Vec<CleanerScan>,
+    readonly: Vec<ReadOnlyScan>,
 }
 
 fn main() -> Result<()> {
+    init_tracing();
     let cli = Cli::parse();
     match cli.command {
         Command::Scan(args) => scan_command(args),
         Command::Clean(args) => clean_command(args),
-        Command::List => list_command(),
+        Command::List(args) => list_command(args),
         Command::Tui => cleanrs_tui::run(),
     }
+}
+
+fn init_tracing() {
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("cleanrs=info"));
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(false)
+        .compact()
+        .try_init();
 }
 
 fn scan_command(args: ScanArgs) -> Result<()> {
@@ -107,10 +140,18 @@ fn scan_command(args: ScanArgs) -> Result<()> {
         selected_cleaners(Some(ids))?;
     }
     let reports = scan_all(args.only.as_deref());
+    let readonly = scan_all_reports();
     if args.json {
-        println!("{}", serde_json::to_string_pretty(&reports)?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&ScanOutput {
+                cleaners: reports,
+                readonly
+            })?
+        );
     } else {
         print_scan_table(&reports);
+        print_readonly_table(&readonly);
     }
     Ok(())
 }
@@ -118,6 +159,31 @@ fn scan_command(args: ScanArgs) -> Result<()> {
 fn clean_command(args: CleanArgs) -> Result<()> {
     let dry_run = !args.yes || args.dry_run;
     let selected = selected_cleaners(args.only.as_deref())?;
+    let all_mode = args.all || args.only.is_none();
+    let (skipped_readonly_count, skipped_readonly_bytes) = if all_mode {
+        let reports = scan_all_reports();
+        let targets = reports
+            .into_iter()
+            .flat_map(|report| report.targets)
+            .collect::<Vec<_>>();
+        if !dry_run {
+            for target in &targets {
+                record_history(
+                    "clean",
+                    "report-only",
+                    &target.path.display().to_string(),
+                    "skipped_readonly",
+                    &target.description,
+                );
+            }
+        }
+        (
+            targets.len(),
+            targets.iter().map(|target| target.size_bytes).sum(),
+        )
+    } else {
+        (0, 0)
+    };
     let mut results = Vec::new();
     let mut errors = Vec::new();
 
@@ -126,7 +192,17 @@ fn clean_command(args: CleanArgs) -> Result<()> {
             continue;
         }
 
-        if !dry_run && cleaner.risk_level() == cleanrs_core::RiskLevel::Manual && !args.force {
+        if cleaner.risk_level() == RiskLevel::Destructive
+            && args.confirm_destructive.as_deref() != Some("EMPTY TRASH")
+        {
+            errors.push(format!(
+                "{} skipped: requires --confirm-destructive=\"EMPTY TRASH\"; --yes/--force are insufficient",
+                cleaner.id()
+            ));
+            continue;
+        }
+
+        if !dry_run && cleaner.risk_level() == RiskLevel::Manual && !args.force {
             errors.push(format!(
                 "{} requires --force because it is a Manual-risk cleaner",
                 cleaner.id()
@@ -160,6 +236,8 @@ fn clean_command(args: CleanArgs) -> Result<()> {
         dry_run,
         results,
         errors,
+        skipped_readonly_count,
+        skipped_readonly_bytes,
     };
 
     if args.json {
@@ -174,7 +252,12 @@ fn clean_command(args: CleanArgs) -> Result<()> {
     Ok(())
 }
 
-fn list_command() -> Result<()> {
+fn list_command(args: ListArgs) -> Result<()> {
+    if args.readonly {
+        print_readonly_table(&scan_all_reports());
+        return Ok(());
+    }
+
     let mut table = Table::new();
     table.load_preset(UTF8_FULL);
     table.set_header(["ID", "Cleaner", "Category", "Risk", "Available"]);
@@ -266,6 +349,46 @@ fn print_scan_table(reports: &[CleanerScan]) {
     println!("{table}");
 }
 
+fn print_readonly_table(reports: &[ReadOnlyScan]) {
+    println!("Read-only reports (never eligible for clean):");
+    let mut table = Table::new();
+    table.load_preset(UTF8_FULL);
+    table.set_header(["Report", "State", "Size", "Path", "Advice"]);
+    let mut rows = 0;
+    for report in reports {
+        if let Some(error) = &report.error {
+            table.add_row([
+                report.report_id.clone(),
+                "ERROR".to_owned(),
+                "-".to_owned(),
+                error.clone(),
+                report.advice.clone(),
+            ]);
+            rows += 1;
+        }
+        for target in &report.targets {
+            table.add_row([
+                format!("🔒 {}", report.report_id),
+                "READONLY".to_owned(),
+                format_size(target.size_bytes, DECIMAL),
+                target.path.display().to_string(),
+                report.advice.clone(),
+            ]);
+            rows += 1;
+        }
+    }
+    if rows == 0 {
+        table.add_row([
+            "-".to_owned(),
+            "READONLY".to_owned(),
+            "0 B".to_owned(),
+            "No report-only targets found".to_owned(),
+            "System paths remain protected".to_owned(),
+        ]);
+    }
+    println!("{table}");
+}
+
 fn print_full_disk_table(report: &FullDiskScan) {
     println!("Full-disk inventory (read-only; no delete targets generated)");
     println!(
@@ -329,5 +452,13 @@ fn print_clean_output(output: &CleanOutput) {
 
     for error in &output.errors {
         eprintln!("[error] {error}");
+    }
+
+    if output.skipped_readonly_count > 0 {
+        println!(
+            "[skip] Skipped {} read-only targets ({})",
+            output.skipped_readonly_count,
+            format_size(output.skipped_readonly_bytes, DECIMAL)
+        );
     }
 }

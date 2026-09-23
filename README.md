@@ -8,6 +8,7 @@ Code, Kiro CLI, Ollama, and other known cache locations).
 ## Usage
 
     cargo run -p cleanrs -- list
+    cargo run -p cleanrs -- list --readonly
     cargo run -p cleanrs -- scan
     cargo run -p cleanrs -- scan --full-disk
     cargo run -p cleanrs -- tui
@@ -84,8 +85,12 @@ argv arrays (not shell strings) and are Manual-risk unless explicitly marked
 otherwise; they never go through a shell.
 
 Every executed cleanup result and global-tool uninstall is appended to
-`~/.cleanrs/history.log`; dry-run remains read-only. History logging is
-best-effort and never blocks a successful cleanup.
+`~/.cleanrs/history.log` as one JSON object per line; dry-run remains read-only.
+History logging is an audit trail separate from `tracing`, is best-effort, and
+never blocks a successful cleanup. Set `RUST_LOG=cleanrs=debug` for diagnostic
+scan/clean spans. cleanrs is synchronous at the application layer and uses
+Rayon/crossbeam for parallel work; Tokio should only be reintroduced in an
+isolated network module for features such as update checks or remote rules.
 
 Xcode Archives, unavailable simulator devices, Mail downloads, iOS backups,
 and the Docker Desktop VM image are exposed as Manual/Caution review targets.
@@ -138,3 +143,15 @@ Homebrew casks may require administrator authentication: run sudo -v in a
 separate Terminal first. cleanrs checks cached authentication without
 collecting or storing the password, so a missing credential fails clearly
 instead of leaving the TUI waiting on a hidden prompt.
+
+The Trash row is deliberately separate from bulk selection and is marked
+`DESTRUCTIVE`. In the TUI press `t`, then type `EMPTY TRASH` exactly and press
+Enter; `y`, `--yes`, and `--force` never bypass this confirmation. The CLI
+equivalent is `--confirm-destructive="EMPTY TRASH"`; use it only when the
+explicit Finder empty-trash action is intended. There is no scheduled or cron
+variant of this action.
+
+`/Library/Updates`, macOS Install Data, and `/System/Volumes/*` are report-only:
+they show their recursively calculated size and advice, but have no `clean`
+method, no selectable checkbox, and are skipped by `clean --all --yes` with an
+explicit read-only summary. Use `list --readonly` to inspect that inventory.

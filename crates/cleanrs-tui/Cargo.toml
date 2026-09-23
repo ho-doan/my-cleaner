@@ -8,7 +8,9 @@ license = "MIT"
 [dependencies]
 anyhow = "1"
 cleanrs-core = { path = "../cleanrs-core" }
+crossbeam-channel = "0.5"
 crossterm = "0.29"
 fs2 = "0.4"
 humansize = "2"
 ratatui = "0.29"
+rayon = "1.10"

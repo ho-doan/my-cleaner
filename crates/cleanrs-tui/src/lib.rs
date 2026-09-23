@@ -1,10 +1,11 @@
 use anyhow::Result;
 use cleanrs_core::{
-    all_cleaners, full_disk_scan, scan_cleaner, scan_directory, scan_global_tools,
-    uninstall_global_tool, Category, CleanMethod, CleanResult, CleanTarget, CleanerScan,
-    DirectoryScan, DirectoryScanEntry, FullDiskScan, GlobalTool, GlobalToolResult, GlobalToolScan,
-    RiskLevel,
+    all_cleaners, full_disk_scan, scan_all_reports, scan_cleaner, scan_directory,
+    scan_global_tools, uninstall_global_tool, Category, CleanMethod, CleanResult, CleanTarget,
+    CleanerScan, DirectoryScan, DirectoryScanEntry, FullDiskScan, GlobalTool, GlobalToolResult,
+    GlobalToolScan, ReadOnlyScan, RiskLevel,
 };
+use crossbeam_channel::{unbounded, Receiver, TryRecvError};
 use crossterm::{
     event::{self, Event, KeyCode, KeyEvent, KeyEventKind},
     execute,
@@ -20,10 +21,10 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Gauge, List, ListItem, ListState, Paragraph, Wrap},
     Frame, Terminal,
 };
+use rayon::prelude::*;
 use std::{
     io::{self, Stdout},
     path::{Path, PathBuf},
-    sync::mpsc::{self, Receiver, TryRecvError},
     thread,
     time::Duration,
 };
@@ -79,6 +80,11 @@ impl DiskUsage {
 struct App {
     mode: Mode,
     rows: Vec<TargetRow>,
+    trash_target: Option<CleanTarget>,
+    trash_selected: bool,
+    readonly_report: Option<ReadOnlyScan>,
+    info_overlay: Option<String>,
+    pending_empty_trash: bool,
     cursor: usize,
     dry_run: bool,
     confirm_text: String,
@@ -120,6 +126,11 @@ impl App {
         Self {
             mode: Mode::Scanning,
             rows: Vec::new(),
+            trash_target: None,
+            trash_selected: false,
+            readonly_report: None,
+            info_overlay: None,
+            pending_empty_trash: false,
             cursor: 0,
             dry_run: true,
             confirm_text: String::new(),
@@ -160,6 +171,11 @@ impl App {
     fn reset_for_scan(&mut self, expected_scans: usize) {
         self.mode = Mode::Scanning;
         self.rows.clear();
+        self.trash_target = None;
+        self.trash_selected = false;
+        self.readonly_report = None;
+        self.info_overlay = None;
+        self.pending_empty_trash = false;
         self.cursor = 0;
         self.received_scans = 0;
         self.expected_scans = expected_scans;
@@ -191,6 +207,11 @@ impl App {
 
     fn add_scan(&mut self, report: CleanerScan) {
         self.received_scans += 1;
+        if report.risk_level == RiskLevel::Destructive {
+            self.trash_target = report.targets.into_iter().next();
+            self.trash_selected = false;
+            return;
+        }
         self.rows
             .extend(report.targets.into_iter().map(|target| TargetRow {
                 cleaner_id: report.cleaner_id.clone(),
@@ -204,14 +225,23 @@ impl App {
 
     fn selected_count(&self) -> usize {
         self.rows.iter().filter(|row| row.selected).count()
+            + usize::from(self.trash_selected && self.trash_target.is_some())
     }
 
     fn selected_size(&self) -> u64 {
-        self.rows
+        let regular = self
+            .rows
             .iter()
             .filter(|row| row.selected)
             .map(|row| row.target.size_bytes)
-            .sum()
+            .sum::<u64>();
+        regular
+            + self
+                .trash_target
+                .as_ref()
+                .filter(|_| self.trash_selected)
+                .map(|target| target.size_bytes)
+                .unwrap_or_default()
     }
 
     fn has_manual_selection(&self) -> bool {
@@ -225,6 +255,12 @@ impl App {
     fn toggle_current(&mut self) {
         if let Some(row) = self.rows.get_mut(self.cursor) {
             row.selected = !row.selected;
+        }
+    }
+
+    fn toggle_trash(&mut self) {
+        if self.trash_target.is_some() {
+            self.trash_selected = !self.trash_selected;
         }
     }
 
@@ -338,24 +374,29 @@ enum CleanMessage {
     Finished,
 }
 
-fn start_scan() -> (usize, Receiver<CleanerScan>) {
+fn start_scan() -> (usize, Receiver<CleanerScan>, Receiver<ReadOnlyScan>) {
     let cleaners = all_cleaners();
     let expected_scans = cleaners.len();
-    let (sender, receiver) = mpsc::channel();
-    for cleaner in cleaners {
-        let sender = sender.clone();
-        thread::spawn(move || {
-            let report = scan_cleaner(cleaner.as_ref());
-            let _ = sender.send(report);
-        });
-    }
-    drop(sender);
-    (expected_scans, receiver)
+    let (sender, receiver) = unbounded();
+    thread::spawn(move || {
+        cleaners
+            .into_par_iter()
+            .for_each_with(sender, |sender, cleaner| {
+                let _ = sender.send(scan_cleaner(cleaner.as_ref()));
+            });
+    });
+    let (readonly_sender, readonly_receiver) = unbounded();
+    rayon::spawn(move || {
+        for report in scan_all_reports() {
+            let _ = readonly_sender.send(report);
+        }
+    });
+    (expected_scans, receiver, readonly_receiver)
 }
 
 fn start_full_disk_scan() -> Receiver<Result<FullDiskScan, String>> {
-    let (sender, receiver) = mpsc::channel();
-    thread::spawn(move || {
+    let (sender, receiver) = unbounded();
+    rayon::spawn(move || {
         let result = full_disk_scan(Path::new("/"), 12).map_err(|error| format!("{error:#}"));
         let _ = sender.send(result);
     });
@@ -363,8 +404,8 @@ fn start_full_disk_scan() -> Receiver<Result<FullDiskScan, String>> {
 }
 
 fn start_global_scan() -> Receiver<Result<GlobalToolScan, String>> {
-    let (sender, receiver) = mpsc::channel();
-    thread::spawn(move || {
+    let (sender, receiver) = unbounded();
+    rayon::spawn(move || {
         let report = scan_global_tools();
         let _ = sender.send(Ok(report));
     });
@@ -372,8 +413,8 @@ fn start_global_scan() -> Receiver<Result<GlobalToolScan, String>> {
 }
 
 fn start_directory_scan(path: PathBuf) -> Receiver<Result<DirectoryScan, String>> {
-    let (sender, receiver) = mpsc::channel();
-    thread::spawn(move || {
+    let (sender, receiver) = unbounded();
+    rayon::spawn(move || {
         let result = scan_directory(&path, 24).map_err(|error| format!("{error:#}"));
         let _ = sender.send(result);
     });
@@ -429,7 +470,7 @@ fn start_explorer_delete(app: &mut App) {
         app.mode = Mode::Reviewing;
         return;
     };
-    let (sender, receiver) = mpsc::channel();
+    let (sender, receiver) = unbounded();
     app.mode = Mode::Cleaning;
     app.explorer_deleting = true;
     app.cleaning_completed = 0;
@@ -437,7 +478,7 @@ fn start_explorer_delete(app: &mut App) {
     app.cleaning_disk_before = app.disk.or_else(read_disk_usage);
     app.explorer_delete_receiver = Some(receiver);
 
-    thread::spawn(move || {
+    rayon::spawn(move || {
         let result = cleanrs_core::executor::clean_target("explorer", &target, false)
             .map_err(|error| format!("{}: {error:#}", target.path.display()));
         let _ = sender.send(result);
@@ -449,7 +490,7 @@ fn start_global_uninstall(app: &mut App) {
         app.mode = Mode::Reviewing;
         return;
     };
-    let (sender, receiver) = mpsc::channel();
+    let (sender, receiver) = unbounded();
     app.mode = Mode::Cleaning;
     app.global_uninstalling = true;
     app.cleaning_completed = 0;
@@ -457,23 +498,28 @@ fn start_global_uninstall(app: &mut App) {
     app.cleaning_disk_before = app.disk.or_else(read_disk_usage);
     app.global_uninstall_receiver = Some(receiver);
 
-    thread::spawn(move || {
+    rayon::spawn(move || {
         let result = uninstall_global_tool(&tool, false).map_err(|error| format!("{error:#}"));
         let _ = sender.send(result);
     });
 }
 
 fn start_cleaning(app: &mut App) {
-    let jobs = app
+    let mut jobs = app
         .rows
         .iter()
         .filter(|row| row.selected)
         .map(|row| (row.cleaner_id.clone(), row.target.clone()))
         .collect::<Vec<_>>();
+    if app.trash_selected {
+        if let Some(target) = app.trash_target.clone() {
+            jobs.push(("trash".to_owned(), target));
+        }
+    }
     let total = jobs.len();
     let dry_run = app.dry_run;
     let disk_before = app.disk.or_else(read_disk_usage);
-    let (sender, receiver) = mpsc::channel();
+    let (sender, receiver) = unbounded();
 
     app.mode = Mode::Cleaning;
     app.results.clear();
@@ -483,7 +529,7 @@ fn start_cleaning(app: &mut App) {
     app.cleaning_disk_before = disk_before;
     app.clean_receiver = Some(receiver);
 
-    thread::spawn(move || {
+    rayon::spawn(move || {
         let cleaners = all_cleaners();
         for (cleaner_id, target) in jobs {
             let outcome = match cleaners.iter().find(|cleaner| cleaner.id() == cleaner_id) {
@@ -501,7 +547,7 @@ fn start_cleaning(app: &mut App) {
 }
 
 fn run_loop(stdout: &mut Stdout) -> Result<()> {
-    let (expected_scans, mut receiver) = start_scan();
+    let (expected_scans, mut receiver, mut readonly_receiver) = start_scan();
     let mut full_disk_receiver: Option<Receiver<Result<FullDiskScan, String>>> = None;
     let mut global_scan_receiver: Option<Receiver<Result<GlobalToolScan, String>>> = None;
     let mut directory_receiver: Option<Receiver<Result<DirectoryScan, String>>> = None;
@@ -511,15 +557,17 @@ fn run_loop(stdout: &mut Stdout) -> Result<()> {
     let mut app = App::new(expected_scans);
     let result = loop {
         receive_scans(&mut app, &receiver);
+        receive_readonly_scan(&mut app, &readonly_receiver);
         receive_full_disk_scan(&mut app, &mut full_disk_receiver);
         receive_global_scan(&mut app, &mut global_scan_receiver);
         receive_directory_scan(&mut app, &mut directory_receiver);
         receive_explorer_delete(&mut app, &mut directory_receiver);
         receive_global_uninstall(&mut app, &mut global_scan_receiver);
         if receive_cleaning(&mut app) {
-            let (expected, next_receiver) = start_scan();
+            let (expected, next_receiver, next_readonly_receiver) = start_scan();
             app.reset_for_scan(expected);
             receiver = next_receiver;
+            readonly_receiver = next_readonly_receiver;
         }
         terminal.draw(|frame| render(frame, &app))?;
 
@@ -635,9 +683,10 @@ fn run_loop(stdout: &mut Stdout) -> Result<()> {
                             }
                         }
                         KeyAction::Rescan => {
-                            let (expected, next_receiver) = start_scan();
+                            let (expected, next_receiver, next_readonly_receiver) = start_scan();
                             app.reset_for_scan(expected);
                             receiver = next_receiver;
+                            readonly_receiver = next_readonly_receiver;
                         }
                         KeyAction::Continue => {}
                     }
@@ -666,6 +715,12 @@ fn receive_scans(app: &mut App, receiver: &Receiver<CleanerScan>) {
     if app.received_scans == app.expected_scans && matches!(app.mode, Mode::Scanning) {
         app.disk = read_disk_usage().or(app.disk);
         app.mode = Mode::Reviewing;
+    }
+}
+
+fn receive_readonly_scan(app: &mut App, receiver: &Receiver<ReadOnlyScan>) {
+    while let Ok(report) = receiver.try_recv() {
+        app.readonly_report = Some(report);
     }
 }
 
@@ -911,6 +966,13 @@ fn handle_key(app: &mut App, key: KeyEvent) -> KeyAction {
         return KeyAction::Quit;
     }
 
+    if app.info_overlay.is_some() {
+        if matches!(key.code, KeyCode::Esc | KeyCode::Char('i')) {
+            app.info_overlay = None;
+        }
+        return KeyAction::Continue;
+    }
+
     match app.mode {
         Mode::Scanning => {}
         Mode::Reviewing => {
@@ -956,10 +1018,43 @@ fn handle_key(app: &mut App, key: KeyEvent) -> KeyAction {
                     KeyCode::Up | KeyCode::Char('k') => app.move_cursor(-1),
                     KeyCode::Char(' ') => app.toggle_current(),
                     KeyCode::Char('a') => app.select_all_safe(),
+                    KeyCode::Char('t') => app.toggle_trash(),
+                    KeyCode::Char('i') => {
+                        if let Some(report) = &app.readonly_report {
+                            let paths = report
+                                .targets
+                                .iter()
+                                .map(|target| {
+                                    format!(
+                                        "{}  ·  {}",
+                                        target.path.display(),
+                                        format_size(target.size_bytes, DECIMAL)
+                                    )
+                                })
+                                .collect::<Vec<_>>();
+                            app.info_overlay = Some(format!(
+                                "{}\n\n{}",
+                                report.advice,
+                                if paths.is_empty() {
+                                    "No current read-only items reported.".to_owned()
+                                } else {
+                                    paths.join("\n")
+                                }
+                            ));
+                        } else {
+                            app.last_action =
+                                Some("Read-only inventory is still scanning".to_owned());
+                        }
+                    }
                     KeyCode::Char('d') => app.dry_run = !app.dry_run,
                     KeyCode::Char('f') => return KeyAction::FullDisk,
                     KeyCode::Char('g') => return KeyAction::GlobalTools,
                     KeyCode::Char('r') => return KeyAction::Rescan,
+                    KeyCode::Enter if app.trash_selected => {
+                        app.confirm_text.clear();
+                        app.pending_empty_trash = true;
+                        app.mode = Mode::Confirming;
+                    }
                     KeyCode::Enter if app.selected_count() > 0 => {
                         app.confirm_text.clear();
                         app.mode = Mode::Confirming;
@@ -975,6 +1070,35 @@ fn handle_key(app: &mut App, key: KeyEvent) -> KeyAction {
 }
 
 fn handle_confirmation(app: &mut App, key: KeyEvent) {
+    if app.pending_empty_trash {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('n') => {
+                app.pending_empty_trash = false;
+                app.confirm_text.clear();
+                app.mode = Mode::Reviewing;
+            }
+            KeyCode::Enter if app.confirm_text == "EMPTY TRASH" => {
+                if app.has_manual_selection() {
+                    app.pending_empty_trash = false;
+                    app.confirm_text.clear();
+                    app.mode = Mode::Reviewing;
+                    app.last_action =
+                        Some("Deselect Manual targets before confirming Empty Trash".to_owned());
+                } else {
+                    app.pending_empty_trash = false;
+                    app.confirm_text.clear();
+                    start_cleaning(app);
+                }
+            }
+            KeyCode::Char(character) => app.confirm_text.push(character),
+            KeyCode::Backspace => {
+                app.confirm_text.pop();
+            }
+            _ => {}
+        }
+        return;
+    }
+
     if app.pending_global_uninstall.is_some() {
         match key.code {
             KeyCode::Esc | KeyCode::Char('n') => {
@@ -1139,13 +1263,16 @@ fn render(frame: &mut Frame, app: &App) {
     );
     if matches!(app.mode, Mode::Confirming) {
         render_confirmation_modal(frame, app);
+    } else if app.info_overlay.is_some() {
+        render_info_modal(frame, app);
     }
 }
 
 fn render_confirmation_modal(frame: &mut Frame, app: &App) {
     let area = centered_rect(78, 48, frame.area());
-    let destructive =
-        app.pending_explorer_delete.is_some() || app.pending_global_uninstall.is_some();
+    let destructive = app.pending_empty_trash
+        || app.pending_explorer_delete.is_some()
+        || app.pending_global_uninstall.is_some();
     let border_color = if destructive {
         Color::Red
     } else {
@@ -1153,7 +1280,29 @@ fn render_confirmation_modal(frame: &mut Frame, app: &App) {
     };
     let mut lines = Vec::new();
 
-    if let Some(tool) = &app.pending_global_uninstall {
+    if app.pending_empty_trash {
+        lines.push(Line::from(Span::styled(
+            "EMPTY TRASH",
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(format!(
+            "This will remove everything inside ~/.Trash ({}).",
+            app.trash_target
+                .as_ref()
+                .map(|target| format_size(target.size_bytes, DECIMAL))
+                .unwrap_or_else(|| "size unavailable".to_owned())
+        )));
+        lines.push(Line::from("This is irreversible from cleanrs."));
+        lines.push(Line::from("Type EMPTY TRASH exactly, then press [enter]."));
+        lines.push(Line::from(format!(
+            "Input: [{}]",
+            if app.confirm_text.is_empty() {
+                "_____"
+            } else {
+                app.confirm_text.as_str()
+            }
+        )));
+    } else if let Some(tool) = &app.pending_global_uninstall {
         lines.push(Line::from(Span::styled(
             "Uninstall global tool",
             Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
@@ -1266,6 +1415,28 @@ fn render_confirmation_modal(frame: &mut Frame, app: &App) {
             .borders(Borders::ALL)
             .border_style(Style::default().fg(border_color)),
     );
+    frame.render_widget(Clear, area);
+    frame.render_widget(modal, area);
+}
+
+fn render_info_modal(frame: &mut Frame, app: &App) {
+    let Some(info) = &app.info_overlay else {
+        return;
+    };
+    let area = centered_rect(78, 48, frame.area());
+    let modal = Paragraph::new(info.as_str())
+        .wrap(Wrap { trim: true })
+        .block(
+            Block::default()
+                .title(" Read-only info ")
+                .title_style(
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                )
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan)),
+        );
     frame.render_widget(Clear, area);
     frame.render_widget(modal, area);
 }
@@ -1764,6 +1935,10 @@ fn render_directory(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
 }
 
 fn render_targets(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(5), Constraint::Length(7)])
+        .split(area);
     let items = if app.rows.is_empty() {
         vec![ListItem::new("No reclaimable targets found.")]
     } else {
@@ -1780,6 +1955,7 @@ fn render_targets(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
                     RiskLevel::Safe => Style::default().fg(Color::Green),
                     RiskLevel::Caution => Style::default().fg(Color::Yellow),
                     RiskLevel::Manual => Style::default().fg(Color::Red),
+                    RiskLevel::Destructive => Style::default().fg(Color::Magenta),
                 };
                 ListItem::new(Line::from(vec![
                     Span::styled(format!("{checkbox} "), Style::default().fg(checkbox_color)),
@@ -1810,7 +1986,68 @@ fn render_targets(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
                 .bg(Color::Rgb(38, 46, 56))
                 .add_modifier(Modifier::BOLD),
         );
-    frame.render_stateful_widget(list, area, &mut state);
+    frame.render_stateful_widget(list, sections[0], &mut state);
+
+    let mut special_items = Vec::new();
+    if let Some(target) = &app.trash_target {
+        let checkbox = if app.trash_selected { "[x]" } else { "[ ]" };
+        special_items.push(ListItem::new(Line::from(vec![
+            Span::styled("🔥 ", Style::default().fg(Color::Red)),
+            Span::styled(
+                format!("{checkbox} Empty Trash"),
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(
+                    "  ·  {}  ·  DESTRUCTIVE  ·  [t] select",
+                    format_size(target.size_bytes, DECIMAL)
+                ),
+                Style::default().fg(Color::Gray),
+            ),
+        ])));
+    } else {
+        special_items.push(ListItem::new("🔥 Empty Trash unavailable or empty."));
+    }
+    if let Some(report) = &app.readonly_report {
+        if report.targets.is_empty() {
+            special_items.push(ListItem::new(Line::from(vec![
+                Span::styled("🔒 [disabled] ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    "No read-only system items reported",
+                    Style::default().fg(Color::Gray),
+                ),
+            ])));
+        } else {
+            for target in report.targets.iter().take(3) {
+                special_items.push(ListItem::new(Line::from(vec![
+                    Span::styled("🔒 [disabled] ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(
+                        format!(
+                            "{}  ·  {}",
+                            target.path.display(),
+                            format_size(target.size_bytes, DECIMAL)
+                        ),
+                        Style::default().fg(Color::Gray),
+                    ),
+                ])));
+            }
+            special_items.push(ListItem::new(Span::styled(
+                "[i] Info · read-only targets are never selectable",
+                Style::default().fg(Color::Cyan),
+            )));
+        }
+    } else {
+        special_items.push(ListItem::new(Span::styled(
+            "🔒 Read-only inventory scanning…",
+            Style::default().fg(Color::Yellow),
+        )));
+    }
+    let special = List::new(special_items).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title("Special review · destructive / read-only"),
+    );
+    frame.render_widget(special, sections[1]);
 }
 
 fn footer_lines(app: &App) -> Vec<Line<'static>> {
@@ -2036,6 +2273,10 @@ fn footer_lines(app: &App) -> Vec<Line<'static>> {
                         Span::raw(" Sel "),
                         footer_key("a"),
                         Span::raw(" Safe "),
+                        footer_key("t"),
+                        Span::raw(" Trash "),
+                        footer_key("i"),
+                        Span::raw(" Info "),
                         footer_key("r"),
                         Span::raw(" Reload "),
                         footer_key("f"),
@@ -2047,7 +2288,49 @@ fn footer_lines(app: &App) -> Vec<Line<'static>> {
             ]
         }
         Mode::Confirming => {
-            if let Some(tool) = &app.pending_global_uninstall {
+            if app.pending_empty_trash {
+                let input = if app.confirm_text.is_empty() {
+                    "_____".to_owned()
+                } else {
+                    app.confirm_text.clone()
+                };
+                vec![
+                    footer_line(
+                        "STATUS",
+                        vec![Span::styled(
+                            format!(
+                                "Destructive · Empty Trash · {}",
+                                app.trash_target
+                                    .as_ref()
+                                    .map(|target| format_size(target.size_bytes, DECIMAL))
+                                    .unwrap_or_else(|| "size unavailable".to_owned())
+                            ),
+                            Style::default().fg(Color::Red),
+                        )],
+                    ),
+                    footer_line(
+                        "INPUT",
+                        vec![
+                            Span::styled("Type EMPTY TRASH: ", Style::default().fg(Color::Yellow)),
+                            Span::styled(
+                                format!("[{input}]"),
+                                Style::default()
+                                    .fg(Color::Yellow)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                        ],
+                    ),
+                    footer_line(
+                        "KEYS",
+                        vec![
+                            footer_key("Enter"),
+                            Span::raw(" Confirm exact phrase   "),
+                            footer_key("n/Esc"),
+                            Span::raw(" Cancel"),
+                        ],
+                    ),
+                ]
+            } else if let Some(tool) = &app.pending_global_uninstall {
                 vec![
                     footer_line(
                         "STATUS",

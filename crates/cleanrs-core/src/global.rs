@@ -173,6 +173,7 @@ pub fn scan_global_tools() -> GlobalToolScan {
     GlobalToolScan { tools, errors }
 }
 
+#[tracing::instrument(skip(tool), fields(manager = ?tool.manager, tool = %tool.name, dry_run))]
 pub fn uninstall_global_tool(tool: &GlobalTool, dry_run: bool) -> Result<GlobalToolResult> {
     let result = uninstall_global_tool_impl(tool, dry_run);
     match &result {

@@ -18,6 +18,15 @@ pub trait Cleaner: Send + Sync {
         clean_target(self.id(), target, dry_run)
     }
 
+    #[tracing::instrument(
+        skip(self, target),
+        fields(
+            cleaner_id = self.id(),
+            target = %target.path.display(),
+            dry_run = options.dry_run,
+            permanent = options.permanent
+        )
+    )]
     fn clean_with_options(
         &self,
         target: &CleanTarget,
@@ -64,9 +73,11 @@ pub fn all_cleaners() -> Vec<Box<dyn Cleaner>> {
         Box::new(rules::xcode::XcodeArchivesCleaner),
         Box::new(rules::xcode::SimulatorCacheCleaner),
         Box::new(rules::docker::DockerCleaner),
+        Box::new(rules::trash::TrashCleaner),
     ]
 }
 
+#[tracing::instrument(skip(cleaner), fields(cleaner_id = cleaner.id()))]
 pub fn scan_cleaner(cleaner: &dyn Cleaner) -> CleanerScan {
     let available = cleaner.is_available();
     let (targets, error) = if !available {

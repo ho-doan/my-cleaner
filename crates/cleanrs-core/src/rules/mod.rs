@@ -17,6 +17,7 @@ pub mod personal;
 pub mod pip;
 pub mod pnpm;
 pub mod simulator;
+pub mod trash;
 pub mod uv;
 pub mod xcode;
 pub mod yarn;
