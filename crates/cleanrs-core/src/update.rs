@@ -24,7 +24,7 @@ struct GithubRelease {
     html_url: String,
 }
 
-/// Check GitHub's latest release without blocking the TUI thread.
+/// Check GitHub's latest release and expose it only after the installer CDN is ready.
 pub fn check_latest_release(current_version: &str) -> Result<Option<UpdateInfo>> {
     let output = Command::new("curl")
         .args([
@@ -57,6 +57,9 @@ pub fn check_latest_release(current_version: &str) -> Result<Option<UpdateInfo>>
         normalize_version(current_version).context("cleanrs has an invalid current version")?;
 
     if compare_versions(&latest_version, &current_version).is_gt() {
+        wait_for_installer_script(&latest_version).with_context(|| {
+            format!("update v{latest_version} is published, but its installer CDN is not ready yet")
+        })?;
         Ok(Some(UpdateInfo {
             current_version,
             latest_version,
