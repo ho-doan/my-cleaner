@@ -12,6 +12,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use crate::executor::move_to_trash;
 use crate::{history::record_history, platform::config::home_path};
 
 const ROOTS: [(&str, &str); 5] = [
@@ -134,8 +135,12 @@ fn remove_standalone_tool_impl(
         });
     }
 
-    trash::delete(&tool.path)
-        .with_context(|| format!("failed to move {} to Trash", tool.path.display()))?;
+    move_to_trash(&tool.path).with_context(|| {
+        format!(
+            "failed to move {} to Trash; check file ownership, parent-directory write permission, or macOS Full Disk Access",
+            tool.path.display()
+        )
+    })?;
     Ok(StandaloneToolResult {
         name: tool.name.clone(),
         path: tool.path.clone(),

@@ -6,6 +6,7 @@ use crate::{
 use anyhow::{anyhow, bail, Context, Result};
 use std::{
     io::{Read, Write},
+    path::Path,
     process::{Command, Stdio},
     sync::mpsc,
     thread,
@@ -96,8 +97,11 @@ pub fn clean_target_with_progress(
                 format!("permanently deleted {}", target.path.display())
             }
             CleanMethod::TrashPath => {
-                trash::delete(&target.path).with_context(|| {
-                    format!("failed to move {} to Trash", target.path.display())
+                move_to_trash(&target.path).with_context(|| {
+                    format!(
+                        "failed to move {} to Trash; check file ownership, parent-directory write permission, or macOS Full Disk Access",
+                        target.path.display()
+                    )
                 })?;
                 format!("moved {} to Trash", target.path.display())
             }
@@ -132,6 +136,24 @@ pub fn clean_target_with_progress(
         _ => {}
     }
     result
+}
+
+pub(crate) fn move_to_trash(path: &Path) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        use trash::macos::{DeleteMethod, TrashContextExtMacos};
+
+        let mut context = trash::TrashContext::new();
+        context.set_delete_method(DeleteMethod::NsFileManager);
+        context.delete(path)?;
+        return Ok(());
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        trash::delete(path)?;
+        Ok(())
+    }
 }
 
 fn delete_permanently(path: &std::path::Path) -> Result<()> {
