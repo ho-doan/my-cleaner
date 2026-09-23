@@ -1,9 +1,9 @@
 use anyhow::Result;
 use cleanrs_core::{
     all_cleaners, full_disk_scan, scan_all_reports, scan_cleaner, scan_directory,
-    scan_global_tools, uninstall_global_tool, Category, CleanMethod, CleanResult, CleanTarget,
-    CleanerScan, DirectoryScan, DirectoryScanEntry, FullDiskScan, GlobalTool, GlobalToolResult,
-    GlobalToolScan, ReadOnlyScan, RiskLevel,
+    scan_global_tools, toggle_delete_allowlist, uninstall_global_tool, Category, CleanMethod,
+    CleanResult, CleanTarget, CleanerScan, DirectoryScan, DirectoryScanEntry, FullDiskScan,
+    GlobalTool, GlobalToolResult, GlobalToolScan, ReadOnlyScan, RiskLevel,
 };
 use crossbeam_channel::{unbounded, Receiver, TryRecvError};
 use crossterm::{
@@ -372,6 +372,7 @@ fn read_disk_usage() -> Option<DiskUsage> {
 }
 
 enum KeyAction {
+    ToggleAllowlist,
     BackDirectory,
     BackGlobalTools,
     Continue,
@@ -486,6 +487,13 @@ fn selected_explorer_target(app: &App) -> Option<CleanTarget> {
         description,
         method: CleanMethod::TrashPath,
     })
+}
+
+fn selected_explorer_path(app: &App) -> Option<PathBuf> {
+    let scan = app.directory_scan.as_ref()?;
+    scan.entries
+        .get(app.directory_cursor)
+        .map(|entry| entry.path.clone())
 }
 
 fn selected_global_tool(app: &App) -> Option<GlobalTool> {
@@ -670,6 +678,38 @@ fn run_loop(stdout: &mut Stdout) -> Result<()> {
                                     "Only approved files or suggested folders can be moved to Trash"
                                         .to_owned(),
                                 );
+                            }
+                        }
+                        KeyAction::ToggleAllowlist => {
+                            let Some(path) = selected_explorer_path(&app) else {
+                                app.last_action = Some(
+                                    "Select a directory before changing the delete allowlist"
+                                        .to_owned(),
+                                );
+                                continue;
+                            };
+                            match toggle_delete_allowlist(&path) {
+                                Ok(true) => {
+                                    app.last_action = Some(format!(
+                                        "Added {} to the delete allowlist; no files were changed",
+                                        path.display()
+                                    ));
+                                }
+                                Ok(false) => {
+                                    app.last_action = Some(format!(
+                                        "Removed {} from the delete allowlist",
+                                        path.display()
+                                    ));
+                                }
+                                Err(error) => {
+                                    app.last_action =
+                                        Some(format!("Delete allowlist unchanged: {error:#}"));
+                                }
+                            }
+                            if let Some(current) =
+                                app.directory_scan.as_ref().map(|scan| scan.path.clone())
+                            {
+                                queue_directory_scan(&mut app, &mut directory_receiver, current);
                             }
                         }
                         KeyAction::FullDisk => {
@@ -1098,6 +1138,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> KeyAction {
                         KeyCode::Down | KeyCode::Char('j') => app.move_directory_cursor(1),
                         KeyCode::Up | KeyCode::Char('k') => app.move_directory_cursor(-1),
                         KeyCode::Enter => return KeyAction::OpenDirectory,
+                        KeyCode::Char('w') => return KeyAction::ToggleAllowlist,
                         KeyCode::Char('x') => return KeyAction::DeleteFile,
                         KeyCode::Char('b') => return KeyAction::BackDirectory,
                         KeyCode::Char('f') => return KeyAction::FullDisk,
@@ -1977,7 +2018,7 @@ fn render_directory(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         };
         items.push(ListItem::new(git_status));
         items.push(ListItem::new(
-            "Entries — Enter opens folders; [x] moves a file/approved suggested folder to Trash",
+            "Entries — Enter opens folders; [w] toggle delete allowlist; [x] move to Trash",
         ));
         let entry_start = items.len();
         if report.entries.is_empty() {
@@ -1986,6 +2027,8 @@ fn render_directory(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
             items.extend(report.entries.iter().map(|entry| {
                 let (marker, color) = if entry.read_only {
                     ("READONLY", Color::Red)
+                } else if entry.allowlisted {
+                    ("ALLOW", Color::Green)
                 } else if entry
                     .suggestion
                     .as_ref()
@@ -2361,6 +2404,8 @@ fn footer_lines(app: &App) -> Vec<Line<'static>> {
                                 ),
                                 footer_key("Enter"),
                                 Span::raw(" Open   "),
+                                footer_key("w"),
+                                Span::raw(" Allowlist   "),
                                 footer_key("x"),
                                 Span::raw(" Trash"),
                             ],

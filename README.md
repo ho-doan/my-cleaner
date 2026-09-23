@@ -145,9 +145,12 @@ an individual system-temp file under `/private/tmp` or `/private/var/tmp`, then
 press x to move it to Trash. System roots, mounted volumes, databases, swap,
 and sensitive folders remain review-only.
 
-The explorer also recognizes `~/.Cocos/profiles` and `~/.Cocos/default` as
-explicitly approved folder targets. They remain recoverable through Trash, but
-the row warns that deleting them resets local Cocos settings.
+For an exact directory that needs explicit review, press `w` in the Explorer
+to toggle it in the delete allowlist at
+`~/.config/cleanrs/whitelist.toml`. Allowlisting only makes that exact
+directory an approved suggestion; it never deletes anything by itself, and
+`x` plus the Trash confirmation are still required. Press `w` again to remove
+the path from the allowlist.
 
 Press g to open the global-tools inventory. It checks Cargo-installed binaries,
 Dart pub global, npm, pnpm, Yarn, uv, pipx, and Homebrew formula/cask when the

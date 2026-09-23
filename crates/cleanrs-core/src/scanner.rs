@@ -44,6 +44,7 @@ pub struct DirectoryScanEntry {
     pub size_bytes: u64,
     pub is_dir: bool,
     pub read_only: bool,
+    pub allowlisted: bool,
     pub suggestion: Option<DirectorySuggestion>,
 }
 
@@ -163,6 +164,7 @@ pub fn scan_directory(path: &Path, limit: usize) -> Result<DirectoryScan> {
     } else {
         Vec::new()
     };
+    let delete_allowlist = crate::allowlist::load_delete_allowlist()?;
     let children = std::fs::read_dir(path)?
         .filter_map(|entry| entry.ok().map(|entry| entry.path()))
         .collect::<Vec<_>>();
@@ -187,8 +189,9 @@ pub fn scan_directory(path: &Path, limit: usize) -> Result<DirectoryScan> {
             } else {
                 (0, 0)
             };
+            let allowlisted = is_dir && delete_allowlist.contains(&child);
             let suggestion = if is_dir {
-                directory_suggestion(&child)
+                directory_suggestion(&child, allowlisted)
             } else {
                 file_suggestion(&child)
             };
@@ -205,6 +208,7 @@ pub fn scan_directory(path: &Path, limit: usize) -> Result<DirectoryScan> {
                     size_bytes,
                     is_dir,
                     read_only,
+                    allowlisted,
                     suggestion,
                 }),
                 inaccessible,
@@ -255,12 +259,11 @@ fn git_context(path: &Path) -> (bool, bool) {
     )
 }
 
-fn directory_suggestion(path: &Path) -> Option<DirectorySuggestion> {
+fn directory_suggestion(path: &Path, allowlisted: bool) -> Option<DirectorySuggestion> {
     let name = path.file_name()?.to_string_lossy();
-    if is_home_cocos_data(path) && matches!(name.as_ref(), "profiles" | "default") {
+    if allowlisted {
         return Some(DirectorySuggestion {
-            reason: "Cocos local profile/config data; deleting resets local Cocos settings"
-                .to_owned(),
+            reason: "user-approved delete allowlist entry; review contents before Trash".to_owned(),
             can_delete: true,
         });
     }
@@ -290,14 +293,6 @@ fn directory_suggestion(path: &Path) -> Option<DirectorySuggestion> {
         reason: reason.to_owned(),
         can_delete,
     })
-}
-
-fn is_home_cocos_data(path: &Path) -> bool {
-    let Some(home) = std::env::var_os("HOME") else {
-        return false;
-    };
-    let cocos_root = PathBuf::from(home).join(".Cocos");
-    path.parent() == Some(cocos_root.as_path())
 }
 
 fn file_suggestion(path: &Path) -> Option<DirectorySuggestion> {
@@ -374,6 +369,7 @@ fn readonly_directory_entry(path: PathBuf) -> (DirectoryScanEntry, usize) {
             size_bytes,
             is_dir: true,
             read_only: true,
+            allowlisted: false,
             suggestion: None,
         },
         inaccessible,
@@ -529,21 +525,13 @@ mod tests {
     }
 
     #[test]
-    fn directory_scan_approves_only_known_home_cocos_folders() {
-        let Some(home) = std::env::var_os("HOME") else {
-            return;
-        };
-        let cocos = Path::new(&home).join(".Cocos");
-        let profiles = cocos.join("profiles");
-        let default = cocos.join("default");
-        let unrelated = Path::new("/tmp/project/profiles");
+    fn directory_scan_approves_allowlisted_folder() {
+        let path = Path::new("/Users/test/.Cocos/profiles");
+        let suggestion = directory_suggestion(path, true).expect("allowlisted folder");
 
-        for path in [&profiles, &default] {
-            let suggestion = directory_suggestion(path).expect("known Cocos folder");
-            assert!(suggestion.can_delete);
-            assert!(suggestion.reason.contains("resets local Cocos settings"));
-        }
-        assert!(directory_suggestion(unrelated).is_none());
+        assert!(suggestion.can_delete);
+        assert!(suggestion.reason.contains("allowlist"));
+        assert!(directory_suggestion(path, false).is_none());
     }
 
     #[test]

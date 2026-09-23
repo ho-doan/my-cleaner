@@ -4,6 +4,7 @@
 //! metadata; a clean operation is the only place where a command or a delete can
 //! be executed.
 
+pub mod allowlist;
 pub mod cleaner;
 pub mod executor;
 pub mod global;
@@ -13,6 +14,7 @@ pub mod report;
 pub mod rules;
 pub mod scanner;
 
+pub use allowlist::{load_delete_allowlist, toggle_delete_allowlist};
 pub use cleaner::{all_cleaners, scan_all, scan_cleaner, Cleaner, CleanerScan};
 pub use global::{
     scan_global_tools, uninstall_global_tool, GlobalTool, GlobalToolManager, GlobalToolResult,
