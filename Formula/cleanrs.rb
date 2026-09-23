@@ -4,9 +4,9 @@ class Cleanrs < Formula
   license "MIT"
 
   if Hardware::CPU.arm?
-    url "https://github.com/ho-doan/my-cleaner/releases/download/v0.1.1/cleanrs-v0.1.1-aarch64-apple-darwin.tar.gz"
+    url "https://github.com/ho-doan/my-cleaner/releases/download/v0.1.2/cleanrs-v0.1.2-aarch64-apple-darwin.tar.gz"
   else
-    url "https://github.com/ho-doan/my-cleaner/releases/download/v0.1.1/cleanrs-v0.1.1-x86_64-apple-darwin.tar.gz"
+    url "https://github.com/ho-doan/my-cleaner/releases/download/v0.1.2/cleanrs-v0.1.2-x86_64-apple-darwin.tar.gz"
   end
 
   def install
