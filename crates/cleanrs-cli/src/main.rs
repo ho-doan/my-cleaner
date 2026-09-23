@@ -104,7 +104,10 @@ fn main() -> Result<()> {
         Command::Scan(args) => scan_command(args),
         Command::Clean(args) => clean_command(args),
         Command::List(args) => list_command(args),
-        Command::Tui => cleanrs_tui::run(),
+        Command::Tui => match cleanrs_tui::run(env!("CARGO_PKG_VERSION"))? {
+            cleanrs_tui::RunOutcome::Exit => Ok(()),
+            cleanrs_tui::RunOutcome::Upgrade(update) => cleanrs_core::perform_upgrade(&update),
+        },
     }
 }
 

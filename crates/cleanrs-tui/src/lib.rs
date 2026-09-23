@@ -1,9 +1,10 @@
 use anyhow::Result;
 use cleanrs_core::{
-    all_cleaners, full_disk_scan, scan_all_reports, scan_cleaner, scan_directory,
-    scan_global_tools, toggle_delete_allowlist, uninstall_global_tool, Category, CleanMethod,
-    CleanResult, CleanTarget, CleanerScan, DirectoryScan, DirectoryScanEntry, FullDiskScan,
-    GlobalTool, GlobalToolResult, GlobalToolScan, ReadOnlyScan, RiskLevel,
+    all_cleaners, check_latest_release, full_disk_scan, scan_all_reports, scan_cleaner,
+    scan_directory, scan_global_tools, toggle_delete_allowlist, uninstall_global_tool, Category,
+    CleanMethod, CleanResult, CleanTarget, CleanerScan, DirectoryScan, DirectoryScanEntry,
+    FullDiskScan, GlobalTool, GlobalToolResult, GlobalToolScan, ReadOnlyScan, RiskLevel,
+    UpdateInfo,
 };
 use crossbeam_channel::{unbounded, Receiver, TryRecvError};
 use crossterm::{
@@ -29,12 +30,17 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub fn run() -> Result<()> {
+pub enum RunOutcome {
+    Exit,
+    Upgrade(UpdateInfo),
+}
+
+pub fn run(current_version: &str) -> Result<RunOutcome> {
     let mut stdout = io::stdout();
     enable_raw_mode()?;
     execute!(stdout, EnterAlternateScreen)?;
 
-    let result = run_loop(&mut stdout);
+    let result = run_loop(&mut stdout, current_version);
 
     disable_raw_mode()?;
     execute!(stdout, LeaveAlternateScreen)?;
@@ -55,6 +61,13 @@ enum Mode {
     Reviewing,
     Confirming,
     Cleaning,
+}
+
+enum UpdateState {
+    Checking,
+    UpToDate,
+    Available(UpdateInfo),
+    Unavailable(String),
 }
 
 #[derive(Clone, Copy)]
@@ -79,6 +92,8 @@ impl DiskUsage {
 
 struct App {
     mode: Mode,
+    current_version: String,
+    update_state: UpdateState,
     rows: Vec<TargetRow>,
     trash_target: Option<CleanTarget>,
     trash_selected: bool,
@@ -127,9 +142,11 @@ struct App {
 }
 
 impl App {
-    fn new(expected_scans: usize) -> Self {
+    fn new(expected_scans: usize, current_version: &str) -> Self {
         Self {
             mode: Mode::Scanning,
+            current_version: current_version.to_owned(),
+            update_state: UpdateState::Checking,
             rows: Vec::new(),
             trash_target: None,
             trash_selected: false,
@@ -218,6 +235,13 @@ impl App {
         self.active_target_size = 0;
         self.active_detail = None;
         self.disk = read_disk_usage().or(self.disk);
+    }
+
+    fn available_update(&self) -> Option<UpdateInfo> {
+        match &self.update_state {
+            UpdateState::Available(update) => Some(update.clone()),
+            _ => None,
+        }
     }
 
     fn add_scan(&mut self, report: CleanerScan) {
@@ -383,6 +407,7 @@ enum KeyAction {
     Quit,
     Rescan,
     UninstallGlobal,
+    Upgrade,
 }
 
 enum CleanMessage {
@@ -413,6 +438,15 @@ fn start_scan() -> (usize, Receiver<CleanerScan>, Receiver<ReadOnlyScan>) {
         }
     });
     (expected_scans, receiver, readonly_receiver)
+}
+
+fn start_update_check(current_version: String) -> Receiver<Result<Option<UpdateInfo>, String>> {
+    let (sender, receiver) = unbounded();
+    rayon::spawn(move || {
+        let result = check_latest_release(&current_version).map_err(|error| format!("{error:#}"));
+        let _ = sender.send(result);
+    });
+    receiver
 }
 
 fn start_full_disk_scan() -> Receiver<Result<FullDiskScan, String>> {
@@ -611,18 +645,20 @@ fn start_cleaning(app: &mut App) {
     });
 }
 
-fn run_loop(stdout: &mut Stdout) -> Result<()> {
+fn run_loop(stdout: &mut Stdout, current_version: &str) -> Result<RunOutcome> {
     let (expected_scans, mut receiver, mut readonly_receiver) = start_scan();
+    let mut update_receiver = Some(start_update_check(current_version.to_owned()));
     let mut full_disk_receiver: Option<Receiver<Result<FullDiskScan, String>>> = None;
     let mut global_scan_receiver: Option<Receiver<Result<GlobalToolScan, String>>> = None;
     let mut directory_receiver: Option<Receiver<Result<DirectoryScan, String>>> = None;
 
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
-    let mut app = App::new(expected_scans);
+    let mut app = App::new(expected_scans, current_version);
     let result = loop {
         receive_scans(&mut app, &receiver);
         receive_readonly_scan(&mut app, &readonly_receiver);
+        receive_update_check(&mut app, &mut update_receiver);
         receive_full_disk_scan(&mut app, &mut full_disk_receiver);
         receive_global_scan(&mut app, &mut global_scan_receiver);
         receive_directory_scan(&mut app, &mut directory_receiver);
@@ -667,7 +703,12 @@ fn run_loop(stdout: &mut Stdout) -> Result<()> {
                             app.show_global_tools = false;
                             app.global_cursor = 0;
                         }
-                        KeyAction::Quit => break Ok(()),
+                        KeyAction::Quit => break Ok(RunOutcome::Exit),
+                        KeyAction::Upgrade => {
+                            if let Some(update) = app.available_update() {
+                                break Ok(RunOutcome::Upgrade(update));
+                            }
+                        }
                         KeyAction::DeleteFile => {
                             if let Some(target) = selected_explorer_target(&app) {
                                 app.pending_explorer_delete = Some(target);
@@ -818,6 +859,33 @@ fn receive_scans(app: &mut App, receiver: &Receiver<CleanerScan>) {
 fn receive_readonly_scan(app: &mut App, receiver: &Receiver<ReadOnlyScan>) {
     while let Ok(report) = receiver.try_recv() {
         app.readonly_report = Some(report);
+    }
+}
+
+fn receive_update_check(
+    app: &mut App,
+    receiver: &mut Option<Receiver<Result<Option<UpdateInfo>, String>>>,
+) {
+    let message = receiver.as_ref().map(|channel| channel.try_recv());
+    match message {
+        Some(Ok(Ok(Some(update)))) => {
+            app.update_state = UpdateState::Available(update);
+            *receiver = None;
+        }
+        Some(Ok(Ok(None))) => {
+            app.update_state = UpdateState::UpToDate;
+            *receiver = None;
+        }
+        Some(Ok(Err(error))) => {
+            app.update_state = UpdateState::Unavailable(error);
+            *receiver = None;
+        }
+        Some(Err(TryRecvError::Disconnected)) => {
+            app.update_state =
+                UpdateState::Unavailable("update check stopped unexpectedly".to_owned());
+            *receiver = None;
+        }
+        Some(Err(TryRecvError::Empty)) | None => {}
     }
 }
 
@@ -1105,6 +1173,13 @@ fn handle_key(app: &mut App, key: KeyEvent) -> KeyAction {
         return KeyAction::Continue;
     }
 
+    if matches!(app.mode, Mode::Reviewing)
+        && key.code == KeyCode::Char('u')
+        && app.available_update().is_some()
+    {
+        return KeyAction::Upgrade;
+    }
+
     match app.mode {
         Mode::Scanning => {}
         Mode::Reviewing => {
@@ -1329,7 +1404,7 @@ fn render(frame: &mut Frame, app: &App) {
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(" MY CLEANER ")
+                .title(format!(" MY CLEANER v{} ", app.current_version))
                 .title_style(
                     Style::default()
                         .fg(Color::Cyan)
@@ -1663,6 +1738,30 @@ fn render_sidebar(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
                 .add_modifier(Modifier::BOLD),
         ),
     ]));
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "VERSION",
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(format!("Current: v{}", app.current_version)));
+    let (update_label, update_color) = match &app.update_state {
+        UpdateState::Checking => ("Checking for updates…".to_owned(), Color::Yellow),
+        UpdateState::UpToDate => ("Up to date".to_owned(), Color::Green),
+        UpdateState::Available(update) => (
+            format!("New v{} · press [u]", update.latest_version),
+            Color::Green,
+        ),
+        UpdateState::Unavailable(error) => (
+            format!("Check unavailable · {}", shorten(error, 24)),
+            Color::DarkGray,
+        ),
+    };
+    lines.push(Line::from(Span::styled(
+        update_label,
+        Style::default().fg(update_color),
+    )));
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         "GLOBAL TOOLS",
@@ -2493,6 +2592,28 @@ fn footer_lines(app: &App) -> Vec<Line<'static>> {
                         format_size(app.selected_size(), DECIMAL)
                     )
                 });
+            let mut keys = vec![
+                footer_key("↑↓"),
+                Span::raw(" Move "),
+                footer_key("Space"),
+                Span::raw(" Sel "),
+                footer_key("a"),
+                Span::raw(" Safe "),
+                footer_key("t"),
+                Span::raw(" Trash "),
+                footer_key("i"),
+                Span::raw(" Info "),
+                footer_key("r"),
+                Span::raw(" Reload "),
+                footer_key("f"),
+                Span::raw(" Full "),
+            ];
+            if app.available_update().is_some() {
+                keys.push(footer_key("u"));
+                keys.push(Span::raw(" Upgrade "));
+            }
+            keys.push(footer_key("q"));
+            keys.push(Span::raw(" Quit"));
             vec![
                 footer_line(
                     "STATUS",
@@ -2519,27 +2640,7 @@ fn footer_lines(app: &App) -> Vec<Line<'static>> {
                         Span::raw(" Continue"),
                     ],
                 ),
-                footer_line(
-                    "KEYS",
-                    vec![
-                        footer_key("↑↓"),
-                        Span::raw(" Move "),
-                        footer_key("Space"),
-                        Span::raw(" Sel "),
-                        footer_key("a"),
-                        Span::raw(" Safe "),
-                        footer_key("t"),
-                        Span::raw(" Trash "),
-                        footer_key("i"),
-                        Span::raw(" Info "),
-                        footer_key("r"),
-                        Span::raw(" Reload "),
-                        footer_key("f"),
-                        Span::raw(" Full "),
-                        footer_key("q"),
-                        Span::raw(" Quit"),
-                    ],
-                ),
+                footer_line("KEYS", keys),
             ]
         }
         Mode::Confirming => {

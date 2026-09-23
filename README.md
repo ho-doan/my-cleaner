@@ -48,8 +48,18 @@ needed.
 
 ## Upgrade
 
-There is no `cleanrs upgrade` command or background self-update yet. Upgrade
-according to the installation method:
+The TUI checks the latest GitHub release in the background each time it opens.
+When a newer verified release is available, the Version panel shows the
+current/latest versions and the footer enables `u`. Pressing `u` closes the
+TUI first, then upgrades through the detected installation channel:
+
+- Homebrew installs run `brew update` and `brew upgrade`.
+- curl installs rerun the HTTPS installer with the verified latest version.
+
+If the network check fails, cleanup remains usable and no upgrade is attempted.
+There is no automatic upgrade.
+
+For a manual upgrade, use the same channel used for installation:
 
     brew update
     brew upgrade ho-doan/my-cleaner/cleanrs

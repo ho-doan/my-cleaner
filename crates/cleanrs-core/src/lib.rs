@@ -13,6 +13,7 @@ pub mod model;
 pub mod report;
 pub mod rules;
 pub mod scanner;
+pub mod update;
 
 pub use allowlist::{load_delete_allowlist, toggle_delete_allowlist};
 pub use cleaner::{all_cleaners, scan_all, scan_cleaner, Cleaner, CleanerScan};
@@ -26,3 +27,4 @@ pub use scanner::{
     can_delete_path, dir_size, full_disk_scan, is_protected_path, scan_directory, DirectoryScan,
     DirectoryScanEntry, DirectorySuggestion, DiskScanEntry, FullDiskScan,
 };
+pub use update::{check_latest_release, perform_upgrade, UpdateInfo};
