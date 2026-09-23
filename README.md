@@ -6,7 +6,7 @@ uv, Yarn, pnpm, Cargo, Docker, and common coding-agent caches (Codex, Claude
 Code, Kiro CLI, Ollama, and other known cache locations).
 
 The core now has explicit `platform/macos` and `platform/windows` configuration
-boundaries. The next `v0.1.7` release includes macOS and Windows binaries.
+boundaries. The public `v0.1.7` release includes macOS and Windows binaries.
 
 Install the Windows binary without Rust or Homebrew from PowerShell:
 
