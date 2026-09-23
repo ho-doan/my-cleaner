@@ -1700,7 +1700,21 @@ fn render_sidebar(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
             .add_modifier(Modifier::BOLD),
     )));
     if app.full_disk_scanning {
-        lines.push(Line::from("Scanning…"));
+        if matches!(app.mode, Mode::Cleaning) {
+            lines.push(Line::from(Span::styled(
+                "Background scan · read-only",
+                Style::default().fg(Color::Yellow),
+            )));
+            lines.push(Line::from(Span::styled(
+                "Cleanup independent · snapshot may be stale",
+                Style::default().fg(Color::Gray),
+            )));
+        } else {
+            lines.push(Line::from(Span::styled(
+                "Scanning root + HOME…",
+                Style::default().fg(Color::Yellow),
+            )));
+        }
     } else if let Some(error) = &app.full_disk_error {
         lines.push(Line::from(format!("Error: {error}")));
     } else if let Some(report) = &app.full_disk {

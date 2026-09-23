@@ -46,6 +46,22 @@ The installer supports Apple Silicon and Intel Macs. Set
 `CLEANRS_INSTALL_DIR` if a different user-writable installation directory is
 needed.
 
+## Upgrade
+
+There is no `cleanrs upgrade` command or background self-update yet. Upgrade
+according to the installation method:
+
+    brew update
+    brew upgrade ho-doan/my-cleaner/cleanrs
+
+For the curl installer, run the installer again; it replaces only the existing
+user-local binary after verifying the release checksum:
+
+    curl -fsSL https://raw.githubusercontent.com/ho-doan/my-cleaner/master/scripts/install.sh | sh
+
+Verify the installed version with `cleanrs --version`. The installer supports
+`CLEANRS_VERSION` for a released version whose checksum is published.
+
 ## Uninstall
 
 For the curl installer, remove only the cleanrs binary:
