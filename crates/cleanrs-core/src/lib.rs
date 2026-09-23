@@ -6,11 +6,16 @@
 
 pub mod cleaner;
 pub mod executor;
+pub mod global;
 pub mod model;
 pub mod rules;
 pub mod scanner;
 
 pub use cleaner::{all_cleaners, scan_all, scan_cleaner, Cleaner, CleanerScan};
+pub use global::{
+    scan_global_tools, uninstall_global_tool, GlobalTool, GlobalToolManager, GlobalToolResult,
+    GlobalToolScan,
+};
 pub use model::{Category, CleanMethod, CleanResult, CleanTarget, RiskLevel};
 pub use scanner::{
     can_delete_path, dir_size, full_disk_scan, is_protected_path, scan_directory, DirectoryScan,

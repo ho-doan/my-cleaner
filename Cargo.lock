@@ -195,6 +195,7 @@ dependencies = [
  "jwalk",
  "rayon",
  "serde",
+ "serde_json",
  "tempfile",
  "trash",
 ]

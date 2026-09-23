@@ -1,7 +1,9 @@
 use anyhow::Result;
 use cleanrs_core::{
-    all_cleaners, full_disk_scan, scan_cleaner, scan_directory, Category, CleanMethod, CleanResult,
-    CleanTarget, CleanerScan, DirectoryScan, DirectoryScanEntry, FullDiskScan, RiskLevel,
+    all_cleaners, full_disk_scan, scan_cleaner, scan_directory, scan_global_tools,
+    uninstall_global_tool, Category, CleanMethod, CleanResult, CleanTarget, CleanerScan,
+    DirectoryScan, DirectoryScanEntry, FullDiskScan, GlobalTool, GlobalToolResult, GlobalToolScan,
+    RiskLevel,
 };
 use crossterm::{
     event::{self, Event, KeyCode, KeyEvent, KeyEventKind},
@@ -90,6 +92,14 @@ struct App {
     full_disk_error: Option<String>,
     show_full_disk: bool,
     full_disk_cursor: usize,
+    show_global_tools: bool,
+    global_tools: Option<GlobalToolScan>,
+    global_tools_scanning: bool,
+    global_tools_error: Option<String>,
+    global_cursor: usize,
+    pending_global_uninstall: Option<GlobalTool>,
+    global_uninstall_receiver: Option<Receiver<Result<GlobalToolResult, String>>>,
+    global_uninstalling: bool,
     directory_scan: Option<DirectoryScan>,
     directory_scanning: bool,
     directory_error: Option<String>,
@@ -123,6 +133,14 @@ impl App {
             full_disk_error: None,
             show_full_disk: false,
             full_disk_cursor: 0,
+            show_global_tools: false,
+            global_tools: None,
+            global_tools_scanning: false,
+            global_tools_error: None,
+            global_cursor: 0,
+            pending_global_uninstall: None,
+            global_uninstall_receiver: None,
+            global_uninstalling: false,
             directory_scan: None,
             directory_scanning: false,
             directory_error: None,
@@ -148,6 +166,14 @@ impl App {
         self.confirm_text.clear();
         self.show_full_disk = false;
         self.full_disk_cursor = 0;
+        self.show_global_tools = false;
+        self.global_tools = None;
+        self.global_tools_scanning = false;
+        self.global_tools_error = None;
+        self.global_cursor = 0;
+        self.pending_global_uninstall = None;
+        self.global_uninstall_receiver = None;
+        self.global_uninstalling = false;
         self.directory_scan = None;
         self.directory_scanning = false;
         self.directory_error = None;
@@ -244,6 +270,27 @@ impl App {
             .unwrap_or(&[])
     }
 
+    fn global_tools(&self) -> &[GlobalTool] {
+        self.global_tools
+            .as_ref()
+            .map(|scan| scan.tools.as_slice())
+            .unwrap_or(&[])
+    }
+
+    fn move_global_cursor(&mut self, delta: i32) {
+        let len = self.global_tools().len();
+        if len == 0 {
+            return;
+        }
+        let max = len - 1;
+        self.global_cursor = if delta.is_negative() {
+            self.global_cursor
+                .saturating_sub(delta.unsigned_abs() as usize)
+        } else {
+            (self.global_cursor + delta as usize).min(max)
+        };
+    }
+
     fn move_directory_cursor(&mut self, delta: i32) {
         let len = if self.directory_scan.is_some() {
             self.directory_entries().len()
@@ -275,12 +322,15 @@ fn read_disk_usage() -> Option<DiskUsage> {
 
 enum KeyAction {
     BackDirectory,
+    BackGlobalTools,
     Continue,
     DeleteFile,
     FullDisk,
+    GlobalTools,
     OpenDirectory,
     Quit,
     Rescan,
+    UninstallGlobal,
 }
 
 enum CleanMessage {
@@ -308,6 +358,15 @@ fn start_full_disk_scan() -> Receiver<Result<FullDiskScan, String>> {
     thread::spawn(move || {
         let result = full_disk_scan(Path::new("/"), 12).map_err(|error| format!("{error:#}"));
         let _ = sender.send(result);
+    });
+    receiver
+}
+
+fn start_global_scan() -> Receiver<Result<GlobalToolScan, String>> {
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let report = scan_global_tools();
+        let _ = sender.send(Ok(report));
     });
     receiver
 }
@@ -361,6 +420,10 @@ fn selected_explorer_target(app: &App) -> Option<CleanTarget> {
     })
 }
 
+fn selected_global_tool(app: &App) -> Option<GlobalTool> {
+    app.global_tools().get(app.global_cursor).cloned()
+}
+
 fn start_explorer_delete(app: &mut App) {
     let Some(target) = app.pending_explorer_delete.take() else {
         app.mode = Mode::Reviewing;
@@ -377,6 +440,25 @@ fn start_explorer_delete(app: &mut App) {
     thread::spawn(move || {
         let result = cleanrs_core::executor::clean_target("explorer", &target, false)
             .map_err(|error| format!("{}: {error:#}", target.path.display()));
+        let _ = sender.send(result);
+    });
+}
+
+fn start_global_uninstall(app: &mut App) {
+    let Some(tool) = app.pending_global_uninstall.take() else {
+        app.mode = Mode::Reviewing;
+        return;
+    };
+    let (sender, receiver) = mpsc::channel();
+    app.mode = Mode::Cleaning;
+    app.global_uninstalling = true;
+    app.cleaning_completed = 0;
+    app.cleaning_total = 1;
+    app.cleaning_disk_before = app.disk.or_else(read_disk_usage);
+    app.global_uninstall_receiver = Some(receiver);
+
+    thread::spawn(move || {
+        let result = uninstall_global_tool(&tool, false).map_err(|error| format!("{error:#}"));
         let _ = sender.send(result);
     });
 }
@@ -421,6 +503,7 @@ fn start_cleaning(app: &mut App) {
 fn run_loop(stdout: &mut Stdout) -> Result<()> {
     let (expected_scans, mut receiver) = start_scan();
     let mut full_disk_receiver: Option<Receiver<Result<FullDiskScan, String>>> = None;
+    let mut global_scan_receiver: Option<Receiver<Result<GlobalToolScan, String>>> = None;
     let mut directory_receiver: Option<Receiver<Result<DirectoryScan, String>>> = None;
 
     let backend = CrosstermBackend::new(stdout);
@@ -429,8 +512,10 @@ fn run_loop(stdout: &mut Stdout) -> Result<()> {
     let result = loop {
         receive_scans(&mut app, &receiver);
         receive_full_disk_scan(&mut app, &mut full_disk_receiver);
+        receive_global_scan(&mut app, &mut global_scan_receiver);
         receive_directory_scan(&mut app, &mut directory_receiver);
         receive_explorer_delete(&mut app, &mut directory_receiver);
+        receive_global_uninstall(&mut app, &mut global_scan_receiver);
         if receive_cleaning(&mut app) {
             let (expected, next_receiver) = start_scan();
             app.reset_for_scan(expected);
@@ -465,6 +550,10 @@ fn run_loop(stdout: &mut Stdout) -> Result<()> {
                                 app.directory_cursor = 0;
                             }
                         }
+                        KeyAction::BackGlobalTools => {
+                            app.show_global_tools = false;
+                            app.global_cursor = 0;
+                        }
                         KeyAction::Quit => break Ok(()),
                         KeyAction::DeleteFile => {
                             if let Some(target) = selected_explorer_target(&app) {
@@ -483,6 +572,7 @@ fn run_loop(stdout: &mut Stdout) -> Result<()> {
                                 app.full_disk_scanning = true;
                                 app.full_disk_error = None;
                                 app.show_full_disk = true;
+                                app.show_global_tools = false;
                                 app.full_disk_cursor = 0;
                                 app.directory_scan = None;
                                 app.directory_scanning = false;
@@ -491,6 +581,32 @@ fn run_loop(stdout: &mut Stdout) -> Result<()> {
                                 app.directory_cursor = 0;
                                 directory_receiver = None;
                                 full_disk_receiver = Some(start_full_disk_scan());
+                            }
+                        }
+                        KeyAction::GlobalTools => {
+                            app.show_global_tools = true;
+                            app.show_full_disk = false;
+                            app.directory_scan = None;
+                            app.directory_scanning = false;
+                            app.directory_error = None;
+                            if !app.global_tools_scanning {
+                                app.global_tools_scanning = true;
+                                app.global_tools_error = None;
+                                app.global_cursor = 0;
+                                global_scan_receiver = Some(start_global_scan());
+                            }
+                        }
+                        KeyAction::UninstallGlobal => {
+                            if let Some(tool) = selected_global_tool(&app) {
+                                if tool.can_uninstall {
+                                    app.pending_global_uninstall = Some(tool);
+                                    app.confirm_text.clear();
+                                    app.mode = Mode::Confirming;
+                                } else {
+                                    app.last_action = Some(tool.warning.unwrap_or_else(|| {
+                                        "This global tool is protected from uninstall".to_owned()
+                                    }));
+                                }
                             }
                         }
                         KeyAction::OpenDirectory => {
@@ -579,6 +695,33 @@ fn receive_full_disk_scan(
     }
 }
 
+fn receive_global_scan(
+    app: &mut App,
+    receiver: &mut Option<Receiver<Result<GlobalToolScan, String>>>,
+) {
+    let message = receiver.as_ref().map(|channel| channel.try_recv());
+    match message {
+        Some(Ok(Ok(report))) => {
+            app.global_tools = Some(report);
+            app.global_tools_scanning = false;
+            app.global_tools_error = None;
+            app.global_cursor = 0;
+            *receiver = None;
+        }
+        Some(Ok(Err(error))) => {
+            app.global_tools_scanning = false;
+            app.global_tools_error = Some(error);
+            *receiver = None;
+        }
+        Some(Err(TryRecvError::Disconnected)) => {
+            app.global_tools_scanning = false;
+            app.global_tools_error = Some("global tools scan stopped unexpectedly".to_owned());
+            *receiver = None;
+        }
+        Some(Err(TryRecvError::Empty)) | None => {}
+    }
+}
+
 fn receive_directory_scan(
     app: &mut App,
     receiver: &mut Option<Receiver<Result<DirectoryScan, String>>>,
@@ -643,6 +786,50 @@ fn receive_explorer_delete(
             app.explorer_deleting = false;
             app.mode = Mode::Reviewing;
             app.last_action = Some("File delete worker stopped unexpectedly".to_owned());
+        }
+    }
+}
+
+fn receive_global_uninstall(
+    app: &mut App,
+    global_scan_receiver: &mut Option<Receiver<Result<GlobalToolScan, String>>>,
+) {
+    let Some(receiver) = app.global_uninstall_receiver.take() else {
+        return;
+    };
+
+    match receiver.try_recv() {
+        Ok(outcome) => {
+            app.global_uninstalling = false;
+            app.cleaning_completed = 1;
+            app.disk = read_disk_usage().or(app.disk);
+            app.cleaning_disk_before = None;
+            match outcome {
+                Ok(result) => {
+                    app.last_action = Some(format!(
+                        "Uninstalled {} {} · rescanning global tools",
+                        result.manager.label(),
+                        result.name
+                    ));
+                    app.global_tools_scanning = true;
+                    app.global_tools_error = None;
+                    app.global_cursor = 0;
+                    *global_scan_receiver = Some(start_global_scan());
+                }
+                Err(error) => {
+                    app.last_action = Some(format!("Global uninstall failed: {error}"));
+                }
+            }
+            app.mode = Mode::Reviewing;
+        }
+        Err(TryRecvError::Empty) => {
+            app.global_uninstall_receiver = Some(receiver);
+        }
+        Err(TryRecvError::Disconnected) => {
+            app.global_uninstalling = false;
+            app.cleaning_disk_before = None;
+            app.mode = Mode::Reviewing;
+            app.last_action = Some("Global uninstall worker stopped unexpectedly".to_owned());
         }
     }
 }
@@ -727,7 +914,25 @@ fn handle_key(app: &mut App, key: KeyEvent) -> KeyAction {
     match app.mode {
         Mode::Scanning => {}
         Mode::Reviewing => {
-            if app.show_full_disk {
+            if app.show_global_tools {
+                if app.global_tools_scanning {
+                    match key.code {
+                        KeyCode::Char('b') => return KeyAction::BackGlobalTools,
+                        KeyCode::Char('f') => return KeyAction::FullDisk,
+                        _ => {}
+                    }
+                } else {
+                    match key.code {
+                        KeyCode::Down | KeyCode::Char('j') => app.move_global_cursor(1),
+                        KeyCode::Up | KeyCode::Char('k') => app.move_global_cursor(-1),
+                        KeyCode::Enter | KeyCode::Char('x') => return KeyAction::UninstallGlobal,
+                        KeyCode::Char('r') => return KeyAction::GlobalTools,
+                        KeyCode::Char('b') => return KeyAction::BackGlobalTools,
+                        KeyCode::Char('f') => return KeyAction::FullDisk,
+                        _ => {}
+                    }
+                }
+            } else if app.show_full_disk {
                 if app.directory_scanning {
                     match key.code {
                         KeyCode::Char('b') => return KeyAction::BackDirectory,
@@ -753,6 +958,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> KeyAction {
                     KeyCode::Char('a') => app.select_all_safe(),
                     KeyCode::Char('d') => app.dry_run = !app.dry_run,
                     KeyCode::Char('f') => return KeyAction::FullDisk,
+                    KeyCode::Char('g') => return KeyAction::GlobalTools,
                     KeyCode::Char('r') => return KeyAction::Rescan,
                     KeyCode::Enter if app.selected_count() > 0 => {
                         app.confirm_text.clear();
@@ -769,6 +975,19 @@ fn handle_key(app: &mut App, key: KeyEvent) -> KeyAction {
 }
 
 fn handle_confirmation(app: &mut App, key: KeyEvent) {
+    if app.pending_global_uninstall.is_some() {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('n') => {
+                app.pending_global_uninstall = None;
+                app.confirm_text.clear();
+                app.mode = Mode::Reviewing;
+            }
+            KeyCode::Char('y') => start_global_uninstall(app),
+            _ => {}
+        }
+        return;
+    }
+
     if app.pending_explorer_delete.is_some() {
         match key.code {
             KeyCode::Esc | KeyCode::Char('n') => {
@@ -813,6 +1032,7 @@ fn render(frame: &mut Frame, app: &App) {
             " cleanrs — scanning {}/{} cleaners ",
             app.received_scans, app.expected_scans
         ),
+        Mode::Reviewing if app.show_global_tools => " cleanrs — global tools ".to_owned(),
         Mode::Reviewing if app.show_full_disk => " cleanrs — full-disk explorer ".to_owned(),
         Mode::Reviewing => " cleanrs — review targets ".to_owned(),
         Mode::Confirming => " cleanrs — confirm ".to_owned(),
@@ -883,7 +1103,9 @@ fn render(frame: &mut Frame, app: &App) {
         .constraints([Constraint::Percentage(24), Constraint::Percentage(76)])
         .split(vertical[1]);
     render_sidebar(frame, app, body[0]);
-    if app.show_full_disk {
+    if app.show_global_tools {
+        render_global_tools(frame, app, body[1]);
+    } else if app.show_full_disk {
         if app.directory_scan.is_some() || app.directory_scanning || app.directory_error.is_some() {
             render_directory(frame, app, body[1]);
         } else {
@@ -922,7 +1144,8 @@ fn render(frame: &mut Frame, app: &App) {
 
 fn render_confirmation_modal(frame: &mut Frame, app: &App) {
     let area = centered_rect(78, 48, frame.area());
-    let destructive = app.pending_explorer_delete.is_some();
+    let destructive =
+        app.pending_explorer_delete.is_some() || app.pending_global_uninstall.is_some();
     let border_color = if destructive {
         Color::Red
     } else {
@@ -930,7 +1153,30 @@ fn render_confirmation_modal(frame: &mut Frame, app: &App) {
     };
     let mut lines = Vec::new();
 
-    if let Some(target) = &app.pending_explorer_delete {
+    if let Some(tool) = &app.pending_global_uninstall {
+        lines.push(Line::from(Span::styled(
+            "Uninstall global tool",
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(format!(
+            "{} · {}{}",
+            tool.manager.label(),
+            tool.name,
+            tool.version
+                .as_deref()
+                .map(|version| format!(" · {version}"))
+                .unwrap_or_default()
+        )));
+        lines.push(Line::from(format!("Command: {}", tool.uninstall_command())));
+        lines.push(Line::from(""));
+        lines.push(Line::from(
+            "This uses the package manager's official uninstall flow.",
+        ));
+        lines.push(Line::from(
+            "Check dependencies first; Homebrew may remove linked dependents.",
+        ));
+        lines.push(Line::from("Press [y] to execute or [n]/[esc] to cancel."));
+    } else if let Some(target) = &app.pending_explorer_delete {
         let item_kind = if target.path.is_dir() {
             "folder and all contents"
         } else {
@@ -1088,6 +1334,35 @@ fn render_sidebar(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     ]));
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
+        "GLOBAL TOOLS",
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )));
+    if app.global_tools_scanning {
+        lines.push(Line::from(Span::styled(
+            "Scanning global tools…",
+            Style::default().fg(Color::Yellow),
+        )));
+    } else if let Some(report) = &app.global_tools {
+        let removable = report
+            .tools
+            .iter()
+            .filter(|tool| tool.can_uninstall)
+            .count();
+        lines.push(Line::from(format!("Installed: {}", report.tools.len())));
+        lines.push(Line::from(format!("Removable: {removable}")));
+        if !report.errors.is_empty() {
+            lines.push(Line::from(Span::styled(
+                format!("Provider warnings: {}", report.errors.len()),
+                Style::default().fg(Color::Yellow),
+            )));
+        }
+    } else {
+        lines.push(Line::from("Press [g] to inspect"));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
         "STORAGE",
         Style::default()
             .fg(Color::Cyan)
@@ -1202,6 +1477,79 @@ fn render_sidebar(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         ),
         area,
     );
+}
+
+fn render_global_tools(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
+    let mut items = vec![ListItem::new(
+        "Global installs · x/Enter review · manager-owned uninstall",
+    )];
+    let mut selected_index = None;
+
+    if app.global_tools_scanning {
+        items.push(ListItem::new("Scanning Cargo and other providers…"));
+    } else if let Some(error) = &app.global_tools_error {
+        items.push(ListItem::new(format!("Scan error: {error}")));
+    } else if let Some(report) = &app.global_tools {
+        if report.tools.is_empty() && report.errors.is_empty() {
+            items.push(ListItem::new("No global tools found."));
+        }
+        for error in &report.errors {
+            items.push(ListItem::new(Line::from(vec![
+                Span::styled("[WARN] ", Style::default().fg(Color::Yellow)),
+                Span::styled(error.as_str(), Style::default().fg(Color::Gray)),
+            ])));
+        }
+
+        let tools_start = items.len();
+        items.extend(report.tools.iter().map(|tool| {
+            let (marker, color) = if tool.can_uninstall {
+                ("UNINSTALL", Color::Green)
+            } else {
+                ("KEEP", Color::Red)
+            };
+            let version = tool
+                .version
+                .as_deref()
+                .map(|version| format!("  ·  {version}"))
+                .unwrap_or_default();
+            ListItem::new(Line::from(vec![
+                Span::styled(
+                    format!("[{marker}]"),
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("  {:<19}  ", tool.manager.label()),
+                    Style::default().fg(Color::Gray),
+                ),
+                Span::styled(
+                    tool.name.as_str(),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(version, Style::default().fg(Color::Gray)),
+            ]))
+        }));
+        if !report.tools.is_empty() {
+            selected_index = Some(tools_start + app.global_cursor);
+        }
+    } else {
+        items.push(ListItem::new("Press [g] to scan global tools."));
+    }
+
+    let mut state = ListState::default();
+    state.select(selected_index);
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Global tools / uninstall "),
+        )
+        .highlight_symbol("› ")
+        .highlight_style(
+            Style::default()
+                .bg(Color::Rgb(38, 46, 56))
+                .add_modifier(Modifier::BOLD),
+        );
+    frame.render_stateful_widget(list, area, &mut state);
 }
 
 fn render_full_disk(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
@@ -1479,6 +1827,52 @@ fn footer_lines(app: &App) -> Vec<Line<'static>> {
             footer_line("KEYS", vec![footer_key("q"), Span::raw(" Quit")]),
         ],
         Mode::Reviewing => {
+            if app.show_global_tools {
+                let status = if app.global_tools_scanning {
+                    "Global tools · scanning providers".to_owned()
+                } else if let Some(report) = &app.global_tools {
+                    format!(
+                        "Global tools · {} installed · {} provider warning(s)",
+                        report.tools.len(),
+                        report.errors.len()
+                    )
+                } else {
+                    "Global tools · not scanned".to_owned()
+                };
+                return vec![
+                    footer_line(
+                        "STATUS",
+                        vec![Span::styled(
+                            shorten(&status, 58),
+                            Style::default().fg(if app.global_tools_scanning {
+                                Color::Yellow
+                            } else {
+                                Color::Green
+                            }),
+                        )],
+                    ),
+                    footer_line(
+                        "MODE",
+                        vec![Span::styled(
+                            "Manager-owned command · confirmation required",
+                            Style::default().fg(Color::Gray),
+                        )],
+                    ),
+                    footer_line(
+                        "KEYS",
+                        vec![
+                            footer_key("↑↓"),
+                            Span::raw(" Move   "),
+                            footer_key("x/Enter"),
+                            Span::raw(" Remove   "),
+                            footer_key("r"),
+                            Span::raw(" Reload   "),
+                            footer_key("b"),
+                            Span::raw(" Back"),
+                        ],
+                    ),
+                ];
+            }
             if app.show_full_disk {
                 if app.directory_scanning {
                     return vec![
@@ -1644,7 +2038,33 @@ fn footer_lines(app: &App) -> Vec<Line<'static>> {
             ]
         }
         Mode::Confirming => {
-            if let Some(target) = &app.pending_explorer_delete {
+            if let Some(tool) = &app.pending_global_uninstall {
+                vec![
+                    footer_line(
+                        "STATUS",
+                        vec![Span::styled(
+                            format!("Uninstall {} · {}", tool.manager.label(), tool.name),
+                            Style::default().fg(Color::Red),
+                        )],
+                    ),
+                    footer_line(
+                        "MODE",
+                        vec![Span::styled(
+                            "Manager command · check dependencies",
+                            Style::default().fg(Color::Gray),
+                        )],
+                    ),
+                    footer_line(
+                        "KEYS",
+                        vec![
+                            footer_key("y"),
+                            Span::raw(" Run   "),
+                            footer_key("n/Esc"),
+                            Span::raw(" Cancel"),
+                        ],
+                    ),
+                ]
+            } else if let Some(target) = &app.pending_explorer_delete {
                 let item_kind = if target.path.is_dir() {
                     "folder and all contents"
                 } else {
@@ -1760,6 +2180,25 @@ fn footer_lines(app: &App) -> Vec<Line<'static>> {
             }
         }
         Mode::Cleaning => {
+            if app.global_uninstalling {
+                return vec![
+                    footer_line(
+                        "STATUS",
+                        vec![Span::styled(
+                            "Uninstalling global tool…",
+                            Style::default().fg(Color::Magenta),
+                        )],
+                    ),
+                    footer_line(
+                        "PROGRESS",
+                        vec![Span::styled(
+                            "Background command · waiting for package manager",
+                            Style::default().fg(Color::Gray),
+                        )],
+                    ),
+                    footer_line("KEYS", vec![footer_key("q"), Span::raw(" Quit")]),
+                ];
+            }
             let completed = app.cleaning_completed;
             let total = app.cleaning_total;
             let percent = if total == 0 {

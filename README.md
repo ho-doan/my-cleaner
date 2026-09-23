@@ -53,3 +53,11 @@ directory, select a non-protected file, a safe `SUGGEST` folder, a core dump, or
 an individual system-temp file under `/private/tmp` or `/private/var/tmp`, then
 press x to move it to Trash. System roots, mounted volumes, databases, swap,
 and sensitive folders remain review-only.
+
+Press g to open the global-tools inventory. It checks Cargo-installed binaries,
+Dart pub global, npm, pnpm, Yarn, uv, pipx, and Homebrew formula/cask when the
+corresponding command is available. Select a tool and press x or Enter to
+review the exact official uninstall command; y runs it in the background and
+the inventory reloads automatically. cleanrs never deletes a package-manager
+directory directly, and npm itself is shown as `KEEP` because it manages its
+own installation.
