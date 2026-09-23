@@ -9,8 +9,8 @@ permissions:
 
 jobs:
   build:
-    name: Build ${{ matrix.target }}
-    runs-on: ${{ matrix.runner }}
+    name: "Build ${{ matrix.target }}"
+    runs-on: "${{ matrix.runner }}"
     strategy:
       fail-fast: false
       matrix:
@@ -23,21 +23,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.ref }}
+          ref: "${{ github.ref }}"
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
-      - run: cargo build --release --locked -p cleanrs --target ${{ matrix.target }}
-     - name: Package binary
-       run: |
-         staging="cleanrs-${GITHUB_REF_NAME}-${{ matrix.target }}"
-         mkdir -p "$staging"
-         cp "target/${{ matrix.target }}/release/cleanrs" "$staging/cleanrs"
-         tar -czf "${staging}.tar.gz" -C "$staging" cleanrs
+          targets: "${{ matrix.target }}"
+      - run: cargo build --release --locked -p cleanrs --target "${{ matrix.target }}"
+      - name: Package binary
+        run: |
+          staging="cleanrs-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          mkdir -p "$staging"
+          cp "target/${{ matrix.target }}/release/cleanrs" "$staging/cleanrs"
+          tar -czf "${staging}.tar.gz" -C "$staging" cleanrs
       - uses: actions/upload-artifact@v4
-       with:
-          name: cleanrs-${{ matrix.target }}
-          path: cleanrs-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
+        with:
+          name: "cleanrs-${{ matrix.target }}"
+          path: "cleanrs-${{ github.ref_name }}-${{ matrix.target }}.tar.gz"
 
   publish:
     name: Publish GitHub release
@@ -50,4 +50,4 @@ jobs:
           merge-multiple: true
       - uses: softprops/action-gh-release@v2
         with:
-          files: dist/cleanrs-*.tar.gz
+          files: "dist/cleanrs-*.tar.gz"
