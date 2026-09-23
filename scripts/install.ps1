@@ -79,12 +79,12 @@ function Get-ReleaseVersion {
     return ([string]$release.tag_name).TrimStart("v")
 }
 
-function Invoke-DownloadWithRetry([string] $Uri, [string] $OutputFile, [string] $Description) {
+function Invoke-DownloadWithRetry([string] $Uri, [string] $OutputFile, [string] $Description, [bool] $CacheBust = $true) {
     $lastError = "unknown error"
     for ($attempt = 1; $attempt -le $RetryAttempts; $attempt++) {
         try {
             Write-Host "$Description ($attempt/$RetryAttempts)..."
-            $requestUri = Get-AttemptUri $Uri $attempt
+            $requestUri = if ($CacheBust) { Get-AttemptUri $Uri $attempt } else { $Uri }
             $curlPath = Get-CurlPath
             if ($null -ne $curlPath) {
                 $curlArguments = @(
@@ -173,7 +173,7 @@ try {
     $manifest = Get-Content -Raw -Path $ManifestPath
     $expected = Get-ExpectedChecksum $manifest $Archive
 
-    Invoke-DownloadWithRetry "$BaseUrl/$Archive?version=$Version" $ArchivePath "Downloading cleanrs $Version for $Target"
+    Invoke-DownloadWithRetry "$BaseUrl/$Archive" $ArchivePath "Downloading cleanrs $Version for $Target" $false
     $actual = (Get-FileHash -Algorithm SHA256 -Path $ArchivePath).Hash.ToLowerInvariant()
     if ($actual -ne $expected) {
         throw "Checksum verification failed. Expected $expected, got $actual."
