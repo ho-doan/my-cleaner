@@ -13,8 +13,9 @@ Install the Windows binary without Rust or Homebrew from PowerShell:
     irm https://raw.githubusercontent.com/ho-doan/my-cleaner/master/scripts/install.ps1 | iex
 
 It installs a checksum-verified `cleanrs.exe` into the user profile and updates
-the user PATH. The installer supports Windows x64 and waits for the release
-checksum manifest to become available before installing.
+the user PATH. The installer supports Windows x64 and Windows ARM64 through
+the built-in x64 emulation layer, and waits for the release checksum manifest
+to become available before installing.
 
 ## Usage
 

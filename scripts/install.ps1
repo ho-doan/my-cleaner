@@ -45,11 +45,22 @@ function Get-ExpectedChecksum([string] $Manifest, [string] $Archive) {
 }
 
 $Version = Get-ReleaseVersion
-if ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne "X64") {
-    throw "Windows installer currently supports only x86_64 (AMD64)."
+$OsArchitecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
+$Target = switch ($OsArchitecture) {
+    "X64" {
+        "x86_64-pc-windows-msvc"
+        break
+    }
+    "Arm64" {
+        Write-Warning "Windows ARM64 detected; installing the x86_64 build through Windows x64 emulation."
+        "x86_64-pc-windows-msvc"
+        break
+    }
+    default {
+        throw "Windows installer supports x86_64 (AMD64) and ARM64 with x64 emulation; detected $OsArchitecture."
+    }
 }
 
-$Target = "x86_64-pc-windows-msvc"
 $Archive = "cleanrs-v$Version-$Target.zip"
 $BaseUrl = "https://github.com/$Repository/releases/download/v$Version"
 $TempDir = Join-Path ([System.IO.Path]::GetTempPath()) ("cleanrs-install-" + [System.IO.Path]::GetRandomFileName())
