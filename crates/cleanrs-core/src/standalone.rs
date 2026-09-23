@@ -13,7 +13,7 @@ use std::{
 };
 
 use crate::executor::move_to_trash;
-use crate::{history::record_history, platform::config::home_path};
+use crate::{history::record_history, platform::config::home_path, scanner::dir_size};
 
 const ROOTS: [(&str, &str); 5] = [
     (".local/bin", "~/.local/bin"),
@@ -23,19 +23,36 @@ const ROOTS: [(&str, &str); 5] = [
     (".volta/bin", "~/.volta/bin"),
 ];
 
+const VERSION_STORES: [(&str, &str, &str, &str); 2] = [
+    (
+        ".codex/packages/standalone/releases",
+        "~/.codex/packages/standalone/releases",
+        ".codex/packages/standalone/current",
+        "Codex CLI standalone runtime",
+    ),
+    (
+        ".local/share/claude/versions",
+        "~/.local/share/claude/versions",
+        ".local/bin/claude",
+        "Claude Code standalone runtime",
+    ),
+];
+
 #[derive(Clone, Debug, Serialize)]
 pub struct StandaloneTool {
     pub name: String,
     pub path: PathBuf,
     pub source_root: String,
     pub size_bytes: u64,
+    pub is_directory: bool,
     pub can_remove: bool,
     pub warning: Option<String>,
 }
 
 impl StandaloneTool {
     pub fn removal_description(&self) -> String {
-        format!("move {} to Trash", self.path.display())
+        let item_kind = if self.is_directory { "folder" } else { "file" };
+        format!("move {item_kind} {} to Trash", self.path.display())
     }
 }
 
@@ -69,6 +86,17 @@ pub fn scan_standalone_tools() -> StandaloneToolScan {
             continue;
         };
         match scan_root(&root, display_root, running_executable.as_deref()) {
+            Ok(mut found) => tools.append(&mut found),
+            Err(error) => errors.push(format!("{display_root}: {error:#}")),
+        }
+    }
+    for (relative_root, display_root, active_relative_path, description) in VERSION_STORES {
+        let Some(root) = home_path(relative_root) else {
+            continue;
+        };
+        let active_path =
+            home_path(active_relative_path).and_then(|path| fs::canonicalize(path).ok());
+        match scan_version_store(&root, display_root, active_path.as_deref(), description) {
             Ok(mut found) => tools.append(&mut found),
             Err(error) => errors.push(format!("{display_root}: {error:#}")),
         }
@@ -198,7 +226,66 @@ fn scan_root(
             size_bytes,
             path,
             source_root: display_root.to_owned(),
+            is_directory: false,
             can_remove: !running,
+            warning,
+        });
+    }
+    Ok(tools)
+}
+
+fn scan_version_store(
+    root: &Path,
+    display_root: &str,
+    active_path: Option<&Path>,
+    description: &str,
+) -> Result<Vec<StandaloneTool>> {
+    let entries = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error).with_context(|| format!("read {}", root.display())),
+    };
+
+    let mut tools = Vec::new();
+    for entry in entries {
+        let Ok(entry) = entry else {
+            continue;
+        };
+        let name = entry.file_name();
+        if name.to_string_lossy().starts_with('.') {
+            continue;
+        }
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_dir() && !file_type.is_file() && !file_type.is_symlink() {
+            continue;
+        }
+
+        let path = entry.path();
+        let is_directory = file_type.is_dir();
+        let size_bytes = if is_directory {
+            dir_size(&path)?
+        } else {
+            fs::symlink_metadata(&path)
+                .with_context(|| format!("inspect {}", path.display()))?
+                .len()
+        };
+        if size_bytes == 0 {
+            continue;
+        }
+
+        let active = active_path.is_some_and(|active| same_path(&path, active));
+        let warning = active.then(|| {
+            format!("{description} is active; update or uninstall it through its own installer")
+        });
+        tools.push(StandaloneTool {
+            name: name.to_string_lossy().into_owned(),
+            path,
+            source_root: display_root.to_owned(),
+            size_bytes,
+            is_directory,
+            can_remove: !active,
             warning,
         });
     }
@@ -209,6 +296,11 @@ fn is_supported_path(path: &Path) -> bool {
     ROOTS
         .iter()
         .filter_map(|(relative, _)| home_path(relative))
+        .chain(
+            VERSION_STORES
+                .iter()
+                .filter_map(|(relative, _, _, _)| home_path(relative)),
+        )
         .any(|root| path.parent().is_some_and(|parent| parent == root))
 }
 
@@ -243,7 +335,7 @@ fn is_executable(_path: &Path) -> bool {
 
 #[cfg(all(test, unix))]
 mod tests {
-    use super::scan_root;
+    use super::{scan_root, scan_version_store};
     use std::{fs, os::unix::fs::PermissionsExt};
 
     #[test]
@@ -264,5 +356,36 @@ mod tests {
             .warning
             .as_deref()
             .is_some_and(|warning| warning.contains("currently running")));
+    }
+
+    #[test]
+    fn protects_active_version_and_reports_old_directory_size() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let active = root.path().join("active-version");
+        let old = root.path().join("old-version");
+        fs::create_dir(&active).expect("create active version");
+        fs::create_dir(&old).expect("create old version");
+        fs::write(active.join("runtime"), b"active").expect("write active runtime");
+        fs::write(old.join("runtime"), b"old runtime").expect("write old runtime");
+
+        let tools = scan_version_store(
+            root.path(),
+            "~/.codex/packages/standalone/releases",
+            Some(&active),
+            "Codex CLI standalone runtime",
+        )
+        .expect("scan version store");
+        let active_tool = tools
+            .iter()
+            .find(|tool| tool.path == active)
+            .expect("active version");
+        let old_tool = tools
+            .iter()
+            .find(|tool| tool.path == old)
+            .expect("old version");
+        assert!(!active_tool.can_remove);
+        assert!(old_tool.can_remove);
+        assert!(old_tool.is_directory);
+        assert!(old_tool.size_bytes > 0);
     }
 }

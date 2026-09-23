@@ -133,10 +133,14 @@ scan/clean spans. cleanrs is synchronous at the application layer and uses
 Rayon/crossbeam for parallel work; Tokio should only be reintroduced in an
 isolated network module for features such as update checks or remote rules.
 
-Xcode Archives, unavailable simulator devices, Mail downloads, iOS backups,
-and the Docker Desktop VM image are exposed as Manual/Caution review targets.
-CoreSimulator generated caches are Caution targets. `/Library` is
-inventory-only and readonly; system installer leftovers are never turned into
+Xcode Archives, old Xcode.app installations, old macOS installer applications,
+unavailable simulator devices, Mail downloads, iOS backups, and the Docker
+Desktop VM image are exposed as Manual/Caution review targets. Old Xcode apps
+are checked in /Applications and ~/Applications; the active xcode-select -p
+app is excluded. macOS installer apps are checked in /Applications,
+~/Applications, ~/Downloads, ~/Desktop, and ~/Documents. CoreSimulator
+generated caches are Caution targets. /Library is inventory-only and readonly;
+/macOS Install Data and APFS system/update data are never turned into
 unrestricted delete targets.
 
 Interactive cleanup prompts are handled by the rule. For example, Dart's
@@ -212,8 +216,12 @@ executable entries in common user-owned binary roots such as ~/.local/bin,
 installed by a curl/bootstrap script or a direct user installer when no package
 manager can report provenance. Each item shows its exact path and size; cleanrs
 only moves that one file or symlink to Trash after confirmation, never the
-whole root directory. The scan cannot prove installer provenance, so review
-the path before removal. The currently running cleanrs binary is protected.
+whole root directory. It also reports known version stores such as Codex
+standalone releases and Claude Code versions: active versions are KEEP, while
+old direct child folders can be moved to Trash after confirmation. The scan
+cannot prove installer provenance for generic binaries, so review the path
+before removal. The currently running cleanrs binary and active CLI versions
+are protected.
 
 Homebrew casks may require administrator authentication: run sudo -v in a
 separate Terminal first. cleanrs checks cached authentication without

@@ -43,6 +43,7 @@ pub(crate) fn render_standalone_tools(frame: &mut Frame, app: &App, area: ratatu
             } else {
                 ("KEEP", Color::Red)
             };
+            let item_kind = if tool.is_directory { "DIR" } else { "FILE" };
             let path = shorten(&tool.path.display().to_string(), 86);
             ListItem::new(vec![
                 Line::from(vec![
@@ -57,6 +58,10 @@ pub(crate) fn render_standalone_tools(frame: &mut Frame, app: &App, area: ratatu
                     Span::styled(
                         tool.name.as_str(),
                         Style::default().add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        format!("  ·  {item_kind}"),
+                        Style::default().fg(Color::Gray),
                     ),
                     Span::styled(
                         format!("  ·  {}", format_size(tool.size_bytes, DECIMAL)),

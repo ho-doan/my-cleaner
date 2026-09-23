@@ -14,6 +14,8 @@ pub mod docker_desktop;
 pub mod gradle;
 pub mod kiro;
 #[cfg(target_os = "macos")]
+pub mod macos_installers;
+#[cfg(target_os = "macos")]
 pub mod macos_system;
 pub mod maven;
 pub mod npm;

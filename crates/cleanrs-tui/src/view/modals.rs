@@ -93,9 +93,11 @@ pub(crate) fn render_confirmation_modal(frame: &mut Frame, app: &App) {
             format_size(tool.size_bytes, DECIMAL)
         )));
         lines.push(Line::from(""));
-        lines.push(Line::from(
-            "Only this exact file or symlink will move to Trash.",
-        ));
+        lines.push(Line::from(if tool.is_directory {
+            "Only this exact version folder will move to Trash."
+        } else {
+            "Only this exact file or symlink will move to Trash."
+        }));
         lines.push(Line::from(
             "The scan cannot prove installer provenance; review the path before continuing.",
         ));

@@ -88,6 +88,7 @@ pub fn all_cleaners() -> Vec<Box<dyn Cleaner>> {
     {
         cleaners.extend([
             Box::new(rules::macos_system::MacosSystemCleaner) as Box<dyn Cleaner>,
+            Box::new(rules::macos_installers::MacosInstallerCleaner),
             Box::new(rules::brew::BrewCleaner),
             Box::new(rules::docker_desktop::DockerDesktopCleaner),
             Box::new(rules::app_leftovers::AppLeftoverCleaner),
@@ -96,6 +97,7 @@ pub fn all_cleaners() -> Vec<Box<dyn Cleaner>> {
             Box::new(rules::xcode::XcodeCleaner),
             Box::new(rules::xcode::XcodeArchivesCleaner),
             Box::new(rules::xcode::SimulatorCacheCleaner),
+            Box::new(rules::xcode::XcodeInstallationsCleaner),
             Box::new(rules::trash::TrashCleaner),
         ]);
     }

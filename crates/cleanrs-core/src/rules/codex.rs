@@ -85,7 +85,11 @@ fn append_old_releases(targets: &mut Vec<CleanTarget>, root: &Path) -> Result<()
     for entry in
         std::fs::read_dir(&releases).with_context(|| format!("read {}", releases.display()))?
     {
-        let path = entry?.path();
+        let entry = entry?;
+        let path = entry.path();
+        if entry.file_name().to_string_lossy().starts_with('.') || !entry.file_type()?.is_dir() {
+            continue;
+        }
         if active.as_ref().is_some_and(|current| {
             std::fs::canonicalize(&path)
                 .map(|candidate| candidate == *current)
