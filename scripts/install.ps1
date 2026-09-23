@@ -156,6 +156,9 @@ function Get-WindowsTarget {
 
 $Version = Get-ReleaseVersion
 $Target = Get-WindowsTarget
+if ($env:CLEANRS_VERSION) {
+    Write-Warning "CLEANRS_VERSION override is active; installing cleanrs $Version instead of the latest release."
+}
 
 $Archive = "cleanrs-v$Version-$Target.zip"
 $BaseUrl = "https://github.com/$Repository/releases/download/v$Version"
