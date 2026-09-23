@@ -494,11 +494,10 @@ fn selected_explorer_target(app: &App) -> Option<CleanTarget> {
     if entry.read_only {
         return None;
     }
-    if entry.is_dir
-        && !entry
-            .suggestion
-            .as_ref()
-            .is_some_and(|suggestion| suggestion.can_delete)
+    if !entry
+        .suggestion
+        .as_ref()
+        .is_some_and(|suggestion| suggestion.can_delete)
     {
         return None;
     }
@@ -1756,31 +1755,33 @@ fn render_sidebar(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
                 .add_modifier(Modifier::BOLD),
         ),
     ]));
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        "VERSION",
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD),
-    )));
-    lines.push(Line::from(format!("Current: v{}", app.current_version)));
-    let (update_label, update_color) = match &app.update_state {
-        UpdateState::Checking => ("Checking for updates…".to_owned(), Color::Yellow),
-        UpdateState::UpToDate => ("Up to date".to_owned(), Color::Green),
-        UpdateState::Available(update) => (
-            format!("New v{} · press [u]", update.latest_version),
-            Color::Green,
-        ),
-        UpdateState::Unavailable(error) => (
-            format!("Check unavailable · {}", shorten(error, 24)),
-            Color::DarkGray,
-        ),
-    };
-    lines.push(Line::from(Span::styled(
-        update_label,
-        Style::default().fg(update_color),
-    )));
-    lines.push(Line::from(""));
+    if !matches!(&app.update_state, UpdateState::UpToDate) {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "VERSION",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(format!("Current: v{}", app.current_version)));
+        let (update_label, update_color) = match &app.update_state {
+            UpdateState::Checking => ("Checking for updates…".to_owned(), Color::Yellow),
+            UpdateState::Available(update) => (
+                format!("New v{} · press [u]", update.latest_version),
+                Color::Green,
+            ),
+            UpdateState::Unavailable(error) => (
+                format!("Check unavailable · {}", shorten(error, 24)),
+                Color::DarkGray,
+            ),
+            UpdateState::UpToDate => unreachable!("up-to-date version panel is hidden"),
+        };
+        lines.push(Line::from(Span::styled(
+            update_label,
+            Style::default().fg(update_color),
+        )));
+        lines.push(Line::from(""));
+    }
     lines.push(Line::from(Span::styled(
         "GLOBAL TOOLS",
         Style::default()
