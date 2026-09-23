@@ -1,6 +1,12 @@
 use serde::Serialize;
 use std::path::PathBuf;
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct CleanOptions {
+    pub dry_run: bool,
+    pub permanent: bool,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Category {

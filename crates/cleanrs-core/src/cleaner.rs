@@ -1,5 +1,5 @@
-use crate::executor::clean_target;
-use crate::model::{Category, CleanResult, CleanTarget, RiskLevel};
+use crate::executor::{clean_target, clean_target_with_options};
+use crate::model::{Category, CleanOptions, CleanResult, CleanTarget, RiskLevel};
 use crate::rules;
 use anyhow::Result;
 use rayon::prelude::*;
@@ -17,6 +17,14 @@ pub trait Cleaner: Send + Sync {
     fn clean(&self, target: &CleanTarget, dry_run: bool) -> Result<CleanResult> {
         clean_target(self.id(), target, dry_run)
     }
+
+    fn clean_with_options(
+        &self,
+        target: &CleanTarget,
+        options: CleanOptions,
+    ) -> Result<CleanResult> {
+        clean_target_with_options(self.id(), target, options)
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -33,6 +41,7 @@ pub struct CleanerScan {
 pub fn all_cleaners() -> Vec<Box<dyn Cleaner>> {
     vec![
         Box::new(rules::agent_cache::AgentCacheCleaner),
+        Box::new(rules::configured::ConfiguredCleaner),
         Box::new(rules::cargo::CargoCleaner),
         Box::new(rules::codex::CodexCleaner),
         Box::new(rules::claude::ClaudeCleaner),
@@ -48,7 +57,12 @@ pub fn all_cleaners() -> Vec<Box<dyn Cleaner>> {
         Box::new(rules::macos_system::MacosSystemCleaner),
         Box::new(rules::kiro::KiroCleaner),
         Box::new(rules::ollama::OllamaCleaner),
+        Box::new(rules::docker_desktop::DockerDesktopCleaner),
+        Box::new(rules::personal::PersonalDataCleaner),
+        Box::new(rules::simulator::SimulatorUnavailableCleaner),
         Box::new(rules::xcode::XcodeCleaner),
+        Box::new(rules::xcode::XcodeArchivesCleaner),
+        Box::new(rules::xcode::SimulatorCacheCleaner),
         Box::new(rules::docker::DockerCleaner),
     ]
 }

@@ -167,4 +167,21 @@ Output CLI hỗ trợ `--json` để pipe vào jq/script khác.
 4. `cleanrs-tui`: dựng skeleton ratatui, nối vào `cleanrs-core` qua channel.
 5. Polish: trash-safe delete, history log, config override, `--json`.
 
+## 10. Implementation status
+
+The current implementation has completed the core, CLI, TUI, full-disk
+inventory, global-tool management, Trash-safe cleanup, progress/reload flow,
+history logging, user-configured rules, and explicit CLI `--permanent` mode.
+Additional macOS targets now include Xcode Archives, CoreSimulator caches and
+unavailable devices, Docker Desktop's VM image, Mail downloads, and iOS
+backups with appropriate Manual/Caution risk levels.
+
+Remaining roadmap work is intentionally separated from the safe cleanup path:
+
+- persistent disk snapshots/history views in the TUI;
+- a safe, explicit Trash-emptying workflow;
+- installer leftovers and other system-owned paths as readonly inventory;
+- evaluating Tokio/tracing adoption instead of the current std thread/channel
+  implementation.
+
 ---

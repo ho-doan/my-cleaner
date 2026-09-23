@@ -1,7 +1,8 @@
 use anyhow::{bail, Result};
 use clap::{Args, Parser, Subcommand};
 use cleanrs_core::{
-    all_cleaners, full_disk_scan, scan_all, CleanResult, Cleaner, CleanerScan, FullDiskScan,
+    all_cleaners, full_disk_scan, scan_all, CleanOptions, CleanResult, Cleaner, CleanerScan,
+    FullDiskScan,
 };
 use comfy_table::{presets::UTF8_FULL, Table};
 use humansize::{format_size, DECIMAL};
@@ -58,6 +59,10 @@ struct CleanArgs {
     /// Allow execution of Manual-risk rules, such as Docker volume pruning.
     #[arg(long)]
     force: bool,
+    /// Permanently delete TrashPath targets instead of moving them to Trash.
+    /// Requires --yes and does not alter manager-owned commands.
+    #[arg(long, requires = "yes", conflicts_with = "dry_run")]
+    permanent: bool,
     /// Emit machine-readable JSON.
     #[arg(long)]
     json: bool,
@@ -138,7 +143,13 @@ fn clean_command(args: CleanArgs) -> Result<()> {
         };
 
         for target in targets {
-            match cleaner.clean(&target, dry_run) {
+            match cleaner.clean_with_options(
+                &target,
+                CleanOptions {
+                    dry_run,
+                    permanent: args.permanent,
+                },
+            ) {
                 Ok(result) => results.push(result),
                 Err(error) => errors.push(format!("{}: {error:#}", cleaner.id())),
             }

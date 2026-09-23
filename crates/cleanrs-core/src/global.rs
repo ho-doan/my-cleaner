@@ -9,6 +9,7 @@ use serde::Serialize;
 use serde_json::Value;
 use std::{process::Command, string::String};
 
+use crate::history::record_history;
 use crate::rules::command_available;
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -173,6 +174,28 @@ pub fn scan_global_tools() -> GlobalToolScan {
 }
 
 pub fn uninstall_global_tool(tool: &GlobalTool, dry_run: bool) -> Result<GlobalToolResult> {
+    let result = uninstall_global_tool_impl(tool, dry_run);
+    match &result {
+        Ok(outcome) if !outcome.dry_run => record_history(
+            "uninstall",
+            tool.manager.label(),
+            &tool.name,
+            "success",
+            &outcome.message,
+        ),
+        Err(error) if !dry_run => record_history(
+            "uninstall",
+            tool.manager.label(),
+            &tool.name,
+            "failed",
+            &error.to_string(),
+        ),
+        _ => {}
+    }
+    result
+}
+
+fn uninstall_global_tool_impl(tool: &GlobalTool, dry_run: bool) -> Result<GlobalToolResult> {
     if !tool.can_uninstall {
         bail!(
             "{} cannot be uninstalled by cleanrs: {}",

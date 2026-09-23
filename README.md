@@ -14,6 +14,7 @@ Code, Kiro CLI, Ollama, and other known cache locations).
     cargo run -p cleanrs -- scan --only npm,brew --json
     cargo run -p cleanrs -- clean --only npm
     cargo run -p cleanrs -- clean --only npm --yes
+    cargo run -p cleanrs -- clean --only npm --yes --permanent
     cargo run -p cleanrs -- clean --only docker --yes --force
     cargo run -p cleanrs -- scan --only codex,claude,kiro,ollama,agent-caches
 
@@ -68,6 +69,29 @@ cleanrs is released under the [MIT License](LICENSE).
 The clean command is a preview by default. Cleaning never runs unless --yes is
 present. Rules invoke the package manager's own cleanup command instead of
 deleting its internal files directly.
+
+`--permanent` is an additional explicit opt-in for targets that normally move
+to Trash. It requires `--yes`, permanently deletes only path-based targets, and
+does not change the behavior of package-manager commands. The TUI always uses
+Trash-safe deletion.
+
+## User-configured rules
+
+Copy `config/default_rules.toml` to
+`~/.config/cleanrs/rules.toml` to add custom path rules. Paths must be absolute
+or use `~/`. Path rules move data to Trash by default. Optional commands are
+argv arrays (not shell strings) and are Manual-risk unless explicitly marked
+otherwise; they never go through a shell.
+
+Every executed cleanup result and global-tool uninstall is appended to
+`~/.cleanrs/history.log`; dry-run remains read-only. History logging is
+best-effort and never blocks a successful cleanup.
+
+Xcode Archives, unavailable simulator devices, Mail downloads, iOS backups,
+and the Docker Desktop VM image are exposed as Manual/Caution review targets.
+CoreSimulator generated caches are Caution targets. `/Library` is
+inventory-only and readonly; system installer leftovers are never turned into
+unrestricted delete targets.
 
 Interactive cleanup prompts are handled by the rule. For example, Dart's
 `pub cache clean` receives an explicit `y` only after the user confirms execute

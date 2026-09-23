@@ -127,7 +127,7 @@ pub fn full_disk_scan(root: &Path, limit: usize) -> Result<FullDiskScan> {
 /// suggestion, while still requiring an approved cleaner before deletion.
 pub fn is_protected_path(path: &Path) -> bool {
     [
-        "/System", "/Volumes", "/private", "/dev", "/cores", "/usr", "/bin", "/sbin",
+        "/System", "/Library", "/Volumes", "/private", "/dev", "/cores", "/usr", "/bin", "/sbin",
     ]
     .into_iter()
     .map(Path::new)
@@ -314,7 +314,7 @@ fn file_suggestion(path: &Path) -> Option<DirectorySuggestion> {
 
 fn excluded_root_paths(root: &Path) -> Vec<PathBuf> {
     [
-        "System", "Volumes", "private", "dev", "cores", "usr", "bin", "sbin",
+        "System", "Library", "Volumes", "private", "dev", "cores", "usr", "bin", "sbin",
     ]
     .into_iter()
     .map(|name| root.join(name))
@@ -474,6 +474,7 @@ mod tests {
     fn home_data_is_reviewable_not_system_read_only() {
         assert!(is_protected_path(std::path::Path::new("/System/Library")));
         assert!(is_protected_path(std::path::Path::new("/private/var")));
+        assert!(is_protected_path(std::path::Path::new("/Library/Updates")));
         assert!(!is_protected_path(std::path::Path::new(
             "/Users/test/Library/Developer/CoreSimulator"
         )));

@@ -1,3 +1,15 @@
-# Reserved for user-configurable rules in the next implementation milestone.
-# Built-in rules are intentionally compiled and command-safe for now.
+# Copy this file to ~/.config/cleanrs/rules.toml to enable user rules.
+# Paths must be absolute or start with ~/.
+# A path rule moves its target to the macOS Trash by default.
+# Commands use direct argv execution; shell strings and shell expansion are not
+# supported. Command rules are Manual-risk by default.
 
+[[rules]]
+# path = "~/Library/Caches/MyApp"
+# description = "MyApp cache"
+# risk = "caution"
+
+[[rules]]
+# path = "~/Library/Caches/MyTool"
+# description = "MyTool cache cleanup"
+# command = ["mytool", "cache", "clean"]

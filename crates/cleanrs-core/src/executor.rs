@@ -1,54 +1,119 @@
 use crate::{
     can_delete_path,
-    model::{CleanMethod, CleanResult, CleanTarget},
+    history::record_history,
+    model::{CleanMethod, CleanOptions, CleanResult, CleanTarget},
 };
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use std::{
     io::Write,
     process::{Command, Stdio},
 };
 
 pub fn clean_target(cleaner_id: &str, target: &CleanTarget, dry_run: bool) -> Result<CleanResult> {
+    clean_target_with_options(
+        cleaner_id,
+        target,
+        CleanOptions {
+            dry_run,
+            permanent: false,
+        },
+    )
+}
+
+pub fn clean_target_with_options(
+    cleaner_id: &str,
+    target: &CleanTarget,
+    options: CleanOptions,
+) -> Result<CleanResult> {
     if !can_delete_path(&target.path) {
-        bail!(
+        let error = anyhow!(
             "refusing to clean protected or unsafe path: {}",
             target.path.display()
         );
+        if !options.dry_run {
+            record_history(
+                "clean",
+                cleaner_id,
+                &target.path.display().to_string(),
+                "rejected",
+                &error.to_string(),
+            );
+        }
+        return Err(error);
     }
 
-    if dry_run {
-        return Ok(CleanResult {
+    let result: Result<CleanResult> = if options.dry_run {
+        Ok(CleanResult {
             cleaner_id: cleaner_id.to_owned(),
             target: target.path.display().to_string(),
             dry_run: true,
             executed: false,
             success: true,
             expected_freed_bytes: target.size_bytes,
-            message: "dry-run: no command executed".to_owned(),
-        });
-    }
+            message: if options.permanent {
+                "dry-run: would permanently delete".to_owned()
+            } else {
+                "dry-run: would move to Trash".to_owned()
+            },
+        })
+    } else {
+        let message = match &target.method {
+            CleanMethod::RunCommand(arguments) => execute_command(arguments, None)?,
+            CleanMethod::RunCommandWithInput { arguments, stdin } => {
+                execute_command(arguments, Some(stdin.as_bytes()))?
+            }
+            CleanMethod::TrashPath if options.permanent => {
+                delete_permanently(&target.path)?;
+                format!("permanently deleted {}", target.path.display())
+            }
+            CleanMethod::TrashPath => {
+                trash::delete(&target.path).with_context(|| {
+                    format!("failed to move {} to Trash", target.path.display())
+                })?;
+                format!("moved {} to Trash", target.path.display())
+            }
+        };
 
-    let message = match &target.method {
-        CleanMethod::RunCommand(arguments) => execute_command(arguments, None)?,
-        CleanMethod::RunCommandWithInput { arguments, stdin } => {
-            execute_command(arguments, Some(stdin.as_bytes()))?
-        }
-        CleanMethod::TrashPath => {
-            trash::delete(&target.path)
-                .with_context(|| format!("failed to move {} to Trash", target.path.display()))?;
-            format!("moved {} to Trash", target.path.display())
-        }
+        Ok(CleanResult {
+            cleaner_id: cleaner_id.to_owned(),
+            target: target.path.display().to_string(),
+            dry_run: false,
+            executed: true,
+            success: true,
+            expected_freed_bytes: target.size_bytes,
+            message,
+        })
     };
 
-    Ok(CleanResult {
-        cleaner_id: cleaner_id.to_owned(),
-        target: target.path.display().to_string(),
-        dry_run: false,
-        executed: true,
-        success: true,
-        expected_freed_bytes: target.size_bytes,
-        message,
-    })
+    match &result {
+        Ok(clean_result) if !clean_result.dry_run => record_history(
+            "clean",
+            cleaner_id,
+            &clean_result.target,
+            "success",
+            &clean_result.message,
+        ),
+        Err(error) if !options.dry_run => record_history(
+            "clean",
+            cleaner_id,
+            &target.path.display().to_string(),
+            "failed",
+            &error.to_string(),
+        ),
+        _ => {}
+    }
+    result
+}
+
+fn delete_permanently(path: &std::path::Path) -> Result<()> {
+    let metadata =
+        std::fs::symlink_metadata(path).with_context(|| format!("inspect {}", path.display()))?;
+    if metadata.file_type().is_dir() {
+        std::fs::remove_dir_all(path)
+    } else {
+        std::fs::remove_file(path)
+    }
+    .with_context(|| format!("permanently delete {}", path.display()))
 }
 
 fn execute_command(arguments: &[String], stdin: Option<&[u8]>) -> Result<String> {
@@ -139,5 +204,41 @@ mod tests {
         let error = clean_target("test", &target, false).expect_err("path must be rejected");
 
         assert!(error.to_string().contains("protected or unsafe path"));
+    }
+
+    #[test]
+    fn permanent_delete_requires_an_explicit_option_but_is_supported() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let path = root.path().join("generated");
+        std::fs::write(&path, b"temporary").expect("fixture");
+        let target = CleanTarget {
+            path: path.clone(),
+            size_bytes: 9,
+            description: "generated fixture".to_owned(),
+            method: CleanMethod::TrashPath,
+        };
+
+        let preview = super::clean_target_with_options(
+            "test",
+            &target,
+            crate::model::CleanOptions {
+                dry_run: true,
+                permanent: true,
+            },
+        )
+        .expect("preview should succeed");
+        assert!(preview.dry_run);
+        assert!(path.exists());
+
+        super::clean_target_with_options(
+            "test",
+            &target,
+            crate::model::CleanOptions {
+                dry_run: false,
+                permanent: true,
+            },
+        )
+        .expect("permanent delete should succeed");
+        assert!(!path.exists());
     }
 }
