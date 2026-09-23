@@ -26,7 +26,7 @@ use std::{
     io::{self, Stdout},
     path::{Path, PathBuf},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 pub fn run() -> Result<()> {
@@ -118,6 +118,10 @@ struct App {
     cleaning_completed: usize,
     cleaning_total: usize,
     cleaning_disk_before: Option<DiskUsage>,
+    cleaning_started_at: Option<Instant>,
+    active_cleaner: Option<String>,
+    active_target: Option<String>,
+    active_target_size: u64,
     last_action: Option<String>,
 }
 
@@ -164,6 +168,10 @@ impl App {
             cleaning_completed: 0,
             cleaning_total: 0,
             cleaning_disk_before: None,
+            cleaning_started_at: None,
+            active_cleaner: None,
+            active_target: None,
+            active_target_size: 0,
             last_action: None,
         }
     }
@@ -202,6 +210,10 @@ impl App {
         self.cleaning_completed = 0;
         self.cleaning_total = 0;
         self.cleaning_disk_before = None;
+        self.cleaning_started_at = None;
+        self.active_cleaner = None;
+        self.active_target = None;
+        self.active_target_size = 0;
         self.disk = read_disk_usage().or(self.disk);
     }
 
@@ -370,6 +382,10 @@ enum KeyAction {
 }
 
 enum CleanMessage {
+    Started {
+        cleaner_id: String,
+        target: CleanTarget,
+    },
     Target(Result<CleanResult, String>),
     Finished,
 }
@@ -476,6 +492,10 @@ fn start_explorer_delete(app: &mut App) {
     app.cleaning_completed = 0;
     app.cleaning_total = 1;
     app.cleaning_disk_before = app.disk.or_else(read_disk_usage);
+    app.cleaning_started_at = Some(Instant::now());
+    app.active_cleaner = Some("explorer".to_owned());
+    app.active_target = Some(target.path.display().to_string());
+    app.active_target_size = target.size_bytes;
     app.explorer_delete_receiver = Some(receiver);
 
     rayon::spawn(move || {
@@ -496,6 +516,10 @@ fn start_global_uninstall(app: &mut App) {
     app.cleaning_completed = 0;
     app.cleaning_total = 1;
     app.cleaning_disk_before = app.disk.or_else(read_disk_usage);
+    app.cleaning_started_at = Some(Instant::now());
+    app.active_cleaner = Some(tool.manager.label().to_owned());
+    app.active_target = Some(tool.name.clone());
+    app.active_target_size = 0;
     app.global_uninstall_receiver = Some(receiver);
 
     rayon::spawn(move || {
@@ -527,11 +551,24 @@ fn start_cleaning(app: &mut App) {
     app.cleaning_completed = 0;
     app.cleaning_total = total;
     app.cleaning_disk_before = disk_before;
+    app.cleaning_started_at = Some(Instant::now());
+    app.active_cleaner = None;
+    app.active_target = None;
+    app.active_target_size = 0;
     app.clean_receiver = Some(receiver);
 
     rayon::spawn(move || {
         let cleaners = all_cleaners();
         for (cleaner_id, target) in jobs {
+            if sender
+                .send(CleanMessage::Started {
+                    cleaner_id: cleaner_id.clone(),
+                    target: target.clone(),
+                })
+                .is_err()
+            {
+                return;
+            }
             let outcome = match cleaners.iter().find(|cleaner| cleaner.id() == cleaner_id) {
                 Some(cleaner) => cleaner
                     .clean(&target, dry_run)
@@ -816,6 +853,10 @@ fn receive_explorer_delete(
         Ok(outcome) => {
             app.explorer_deleting = false;
             app.cleaning_completed = 1;
+            app.cleaning_started_at = None;
+            app.active_cleaner = None;
+            app.active_target = None;
+            app.active_target_size = 0;
             let disk_after = read_disk_usage().or(app.cleaning_disk_before);
             app.disk = disk_after;
             match outcome {
@@ -839,6 +880,10 @@ fn receive_explorer_delete(
         }
         Err(TryRecvError::Disconnected) => {
             app.explorer_deleting = false;
+            app.cleaning_started_at = None;
+            app.active_cleaner = None;
+            app.active_target = None;
+            app.active_target_size = 0;
             app.mode = Mode::Reviewing;
             app.last_action = Some("File delete worker stopped unexpectedly".to_owned());
         }
@@ -857,6 +902,10 @@ fn receive_global_uninstall(
         Ok(outcome) => {
             app.global_uninstalling = false;
             app.cleaning_completed = 1;
+            app.cleaning_started_at = None;
+            app.active_cleaner = None;
+            app.active_target = None;
+            app.active_target_size = 0;
             app.disk = read_disk_usage().or(app.disk);
             app.cleaning_disk_before = None;
             match outcome {
@@ -882,6 +931,10 @@ fn receive_global_uninstall(
         }
         Err(TryRecvError::Disconnected) => {
             app.global_uninstalling = false;
+            app.cleaning_started_at = None;
+            app.active_cleaner = None;
+            app.active_target = None;
+            app.active_target_size = 0;
             app.cleaning_disk_before = None;
             app.mode = Mode::Reviewing;
             app.last_action = Some("Global uninstall worker stopped unexpectedly".to_owned());
@@ -897,6 +950,12 @@ fn receive_cleaning(app: &mut App) -> bool {
     let mut finished = false;
     loop {
         match receiver.try_recv() {
+            Ok(CleanMessage::Started { cleaner_id, target }) => {
+                app.cleaning_started_at = Some(Instant::now());
+                app.active_cleaner = Some(cleaner_id);
+                app.active_target = Some(target.path.display().to_string());
+                app.active_target_size = target.size_bytes;
+            }
             Ok(CleanMessage::Target(outcome)) => {
                 app.cleaning_completed += 1;
                 match outcome {
@@ -952,6 +1011,10 @@ fn receive_cleaning(app: &mut App) -> bool {
         }
     ));
     app.cleaning_disk_before = None;
+    app.cleaning_started_at = None;
+    app.active_cleaner = None;
+    app.active_target = None;
+    app.active_target_size = 0;
 
     if dry_run {
         app.mode = Mode::Reviewing;
@@ -1205,7 +1268,25 @@ fn render(frame: &mut Frame, app: &App) {
         ),
         header[0],
     );
-    if let Some(disk) = app.disk {
+    if matches!(app.mode, Mode::Cleaning) {
+        let ratio = if app.cleaning_total == 0 {
+            0.0
+        } else {
+            app.cleaning_completed as f64 / app.cleaning_total as f64
+        };
+        frame.render_widget(
+            Gauge::default()
+                .ratio(ratio.min(1.0))
+                .gauge_style(Style::default().fg(Color::Magenta))
+                .label(format!(
+                    "{}% · {}/{} targets",
+                    (ratio * 100.0).round() as u16,
+                    app.cleaning_completed,
+                    app.cleaning_total
+                )),
+            header[1],
+        );
+    } else if let Some(disk) = app.disk {
         let gauge_color = if disk.used_ratio() >= 0.9 {
             Color::Red
         } else if disk.used_ratio() >= 0.75 {
@@ -2488,7 +2569,11 @@ fn footer_lines(app: &App) -> Vec<Line<'static>> {
                     footer_line(
                         "PROGRESS",
                         vec![Span::styled(
-                            "Background command · waiting for package manager",
+                            format!(
+                                "{} Background command · elapsed {}",
+                                activity_marker(app),
+                                elapsed_label(app)
+                            ),
                             Style::default().fg(Color::Gray),
                         )],
                     ),
@@ -2505,22 +2590,44 @@ fn footer_lines(app: &App) -> Vec<Line<'static>> {
                     .checked_div(total)
                     .unwrap_or(0)
             };
+            let active_target = app
+                .active_target
+                .as_deref()
+                .map(|target| shorten(target, 64))
+                .unwrap_or_else(|| "Waiting for cleanup worker…".to_owned());
+            let active_size = if app.active_target_size == 0 {
+                String::new()
+            } else {
+                format!(" · {}", format_size(app.active_target_size, DECIMAL))
+            };
+            let active_owner = app.active_cleaner.as_deref().unwrap_or("cleaner");
             vec![
                 footer_line(
                     "STATUS",
                     vec![Span::styled(
                         if app.explorer_deleting {
-                            "Moving selected item to Trash…".to_owned()
+                            format!("{} Moving selected item to Trash", activity_marker(app))
                         } else {
-                            format!("Cleaning {completed}/{total} targets")
+                            format!(
+                                "{} Cleaning {completed}/{total} targets · elapsed {}",
+                                activity_marker(app),
+                                elapsed_label(app)
+                            )
                         },
                         Style::default().fg(Color::Magenta),
                     )],
                 ),
                 footer_line(
+                    "TARGET",
+                    vec![Span::styled(
+                        format!("[{active_owner}] {active_target}{active_size}"),
+                        Style::default().fg(Color::Gray),
+                    )],
+                ),
+                footer_line(
                     "PROGRESS",
                     vec![Span::styled(
-                        format!("{percent}% · background operation"),
+                        format!("{percent}% overall · worker active; large folders may take time"),
                         Style::default().fg(Color::Gray),
                     )],
                 ),
@@ -2528,6 +2635,23 @@ fn footer_lines(app: &App) -> Vec<Line<'static>> {
             ]
         }
     }
+}
+
+fn activity_marker(app: &App) -> char {
+    const FRAMES: [char; 4] = ['|', '/', '-', '\\'];
+    let elapsed_ms = app
+        .cleaning_started_at
+        .map(|started| started.elapsed().as_millis())
+        .unwrap_or_default();
+    FRAMES[((elapsed_ms / 150) as usize) % FRAMES.len()]
+}
+
+fn elapsed_label(app: &App) -> String {
+    let seconds = app
+        .cleaning_started_at
+        .map(|started| started.elapsed().as_secs())
+        .unwrap_or_default();
+    format!("{:02}:{:02}", seconds / 60, seconds % 60)
 }
 
 fn footer_line(label: &str, mut content: Vec<Span<'static>>) -> Line<'static> {
