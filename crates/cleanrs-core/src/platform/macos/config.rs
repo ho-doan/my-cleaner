@@ -82,7 +82,7 @@ pub fn read_only_report_paths() -> Vec<(PathBuf, &'static str)> {
 }
 
 pub fn read_only_advice() -> &'static str {
-    "Read-only macOS system report. Use macOS system tools; cleanrs will never delete these paths."
+    "Apple-managed macOS data is read-only here. For urgent space, Apple supports Safe Mode for certain caches or temporarily setting Time Machine backups to Manual, waiting a few minutes, then turning them back on. cleanrs will never delete system roots, VM/swap data, APFS snapshots, or update volumes."
 }
 
 pub fn command_available(command: &str) -> bool {

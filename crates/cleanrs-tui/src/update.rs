@@ -134,7 +134,7 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) -> KeyAction {
                                 })
                                 .collect::<Vec<_>>();
                             app.info_overlay = Some(format!(
-                                "{}\n\n{}",
+                                "SAFE · generated data that can be recreated\nREVIEW · app data or caches; choose explicitly\nASK FIRST · backups, archives, models, or personal data\n\n{}\n\n{}",
                                 report.advice,
                                 if paths.is_empty() {
                                     "No current read-only items reported.".to_owned()

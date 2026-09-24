@@ -27,6 +27,31 @@ pub enum RiskLevel {
     Destructive,
 }
 
+impl RiskLevel {
+    /// Short, user-facing wording for people who should not need to know the
+    /// internal risk enum names.
+    pub fn user_label(self) -> &'static str {
+        match self {
+            Self::Safe => "SAFE · can be recreated",
+            Self::Caution => "REVIEW · may affect app data",
+            Self::Manual => "ASK FIRST · personal/dev data",
+            Self::Destructive => "IRREVERSIBLE",
+        }
+    }
+
+    /// Explain why an item is or is not selected automatically.
+    pub fn user_explanation(self) -> &'static str {
+        match self {
+            Self::Safe => "Generated cache/build data; the owning tool can recreate it.",
+            Self::Caution => {
+                "Review the app or data before removing it; it is not selected automatically."
+            }
+            Self::Manual => "May contain personal data, backups, models, archives, or live state.",
+            Self::Destructive => "This permanently changes or empties user data.",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "type", content = "value")]
 pub enum CleanMethod {
@@ -60,4 +85,23 @@ pub struct CleanResult {
     pub success: bool,
     pub expected_freed_bytes: u64,
     pub message: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RiskLevel;
+
+    #[test]
+    fn risk_labels_are_plain_language() {
+        assert_eq!(RiskLevel::Safe.user_label(), "SAFE · can be recreated");
+        assert_eq!(
+            RiskLevel::Caution.user_label(),
+            "REVIEW · may affect app data"
+        );
+        assert_eq!(
+            RiskLevel::Manual.user_label(),
+            "ASK FIRST · personal/dev data"
+        );
+        assert_eq!(RiskLevel::Destructive.user_label(), "IRREVERSIBLE");
+    }
 }

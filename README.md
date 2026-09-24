@@ -111,6 +111,34 @@ The clean command is a preview by default. Cleaning never runs unless --yes is
 present. Rules invoke the package manager's own cleanup command instead of
 deleting its internal files directly.
 
+## System Data safety policy
+
+`System Data` is an Apple accounting category, not one directory that can be
+removed safely. Apple says it includes caches, logs, VM files, temporary files,
+fonts, app support files, and plug-ins, and that the category itself is managed
+by macOS. See [Apple's storage documentation](https://support.apple.com/en-am/guide/mac-help/mchl3d437fbc/mac).
+
+cleanrs follows a conservative rule: only generated data with a documented
+rebuild path is `Safe` and preselected. Package-manager caches use the
+manager's own cleanup command, and Xcode DerivedData is treated as generated
+build output. Generic app caches and logs are `Caution` and are never selected
+automatically. Mail downloads, iPhone/iPad backups, Xcode Archives, simulator
+devices, Docker data, models, and old installers are `Manual` review targets
+because they can contain data the user may still need.
+
+Apple-managed areas are inventory-only. cleanrs never deletes `/System`,
+`/Library`, `/private/var`, VM/swap data, APFS snapshots, or macOS update/system
+volumes. When space is urgently needed, the UI explains the Apple-supported
+actions instead: Safe Mode for certain system caches, and temporarily disabling
+Time Machine automatic backups to release local snapshots. See [Apple's storage
+cleanup guidance](https://support.apple.com/en-gb/102624) and [local snapshot
+guidance](https://support.apple.com/en-ca/102154).
+
+The TUI uses plain-language risk labels: `SAFE · can be recreated`,
+`REVIEW · may affect app data`, `ASK FIRST · personal/dev data`, and
+`IRREVERSIBLE`. Review and manual targets require an explicit user choice; no
+scan result is a delete command by itself.
+
 `--permanent` is an additional explicit opt-in for targets that normally move
 to Trash. It requires `--yes`, permanently deletes only path-based targets, and
 does not change the behavior of package-manager commands. The TUI always uses

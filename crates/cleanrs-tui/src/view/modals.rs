@@ -165,6 +165,9 @@ pub(crate) fn render_confirmation_modal(frame: &mut Frame, app: &App) {
         } else {
             "Selected targets will be moved/processed."
         }));
+        lines.push(Line::from(
+            "Only SAFE targets are selected automatically; review the labels before continuing.",
+        ));
         lines.push(Line::from("Press [y] to confirm or [n]/[esc] to cancel."));
     }
 

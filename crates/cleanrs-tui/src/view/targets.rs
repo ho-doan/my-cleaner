@@ -30,7 +30,11 @@ pub(crate) fn render_targets(frame: &mut Frame, app: &App, area: ratatui::layout
         state.select(Some(app.cursor));
     }
     let list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title("Targets"))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Targets · SAFE is preselected"),
+        )
         .highlight_symbol("› ")
         .highlight_style(
             Style::default()
@@ -115,7 +119,7 @@ fn target_list_item(row: &TargetRow, width: usize) -> ListItem<'static> {
         RiskLevel::Destructive => Style::default().fg(Color::Magenta),
     };
     let size = format_size(row.target.size_bytes, DECIMAL);
-    let risk = format!("{:?}", row.risk);
+    let risk = row.risk.user_label();
     let full_text = format!(
         "{checkbox} {}  ·  {}  ·  {size}  {risk}",
         row.cleaner_name, row.target.description
