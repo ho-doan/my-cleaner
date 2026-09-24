@@ -2,10 +2,11 @@
 
 use anyhow::Result;
 use cleanrs_core::{
-    all_cleaners, check_latest_release, default_scan_root, full_disk_scan, scan_all_reports,
-    scan_cleaner, scan_directory, scan_global_tools, toggle_delete_allowlist,
-    uninstall_global_tool, CleanMethod, CleanTarget, CleanerScan, DirectoryScan, FullDiskScan,
-    GlobalTool, GlobalToolScan, ReadOnlyScan, StandaloneTool, StandaloneToolScan, UpdateInfo,
+    all_cleaners, check_latest_release, default_scan_root, full_disk_scan_with_progress,
+    scan_all_reports, scan_cleaner, scan_directory, scan_global_tools, toggle_delete_allowlist,
+    uninstall_global_tool, CleanMethod, CleanTarget, CleanerScan, DirectoryScan,
+    FullDiskScanProgress, GlobalTool, GlobalToolScan, ReadOnlyScan, StandaloneTool,
+    StandaloneToolScan, UpdateInfo,
 };
 use crossbeam_channel::{unbounded, Receiver, TryRecvError};
 use crossterm::event::{self, Event, KeyEventKind};
@@ -55,12 +56,16 @@ fn start_update_check(current_version: String) -> Receiver<Result<Option<UpdateI
     receiver
 }
 
-fn start_full_disk_scan() -> Receiver<Result<FullDiskScan, String>> {
+fn start_full_disk_scan() -> Receiver<Result<FullDiskScanProgress, String>> {
     let (sender, receiver) = unbounded();
     rayon::spawn(move || {
         let root = default_scan_root();
-        let result = full_disk_scan(&root, 12).map_err(|error| format!("{error:#}"));
-        let _ = sender.send(result);
+        let result = full_disk_scan_with_progress(&root, 12, |progress| {
+            let _ = sender.send(Ok(progress));
+        });
+        if let Err(error) = result {
+            let _ = sender.send(Err(format!("{error:#}")));
+        }
     });
     receiver
 }
@@ -316,7 +321,7 @@ pub(crate) fn start_cleaning(app: &mut App) {
 pub(crate) fn run_loop(stdout: &mut Stdout, current_version: &str) -> Result<RunOutcome> {
     let (expected_scans, mut receiver, mut readonly_receiver) = start_scan();
     let mut update_receiver = Some(start_update_check(current_version.to_owned()));
-    let mut full_disk_receiver: Option<Receiver<Result<FullDiskScan, String>>> = None;
+    let mut full_disk_receiver: Option<Receiver<Result<FullDiskScanProgress, String>>> = None;
     let mut global_scan_receiver: Option<Receiver<Result<GlobalToolScan, String>>> = None;
     let mut standalone_scan_receiver: Option<Receiver<Result<StandaloneToolScan, String>>> = None;
     let mut directory_receiver: Option<Receiver<Result<DirectoryScan, String>>> = None;
@@ -428,7 +433,11 @@ pub(crate) fn run_loop(stdout: &mut Stdout, current_version: &str) -> Result<Run
                         KeyAction::FullDisk => {
                             if !app.full_disk_scanning {
                                 app.full_disk_scanning = true;
+                                app.full_disk = None;
                                 app.full_disk_error = None;
+                                app.full_disk_phase = "starting".to_owned();
+                                app.full_disk_completed = 0;
+                                app.full_disk_total = 0;
                                 app.show_full_disk = true;
                                 app.show_global_tools = false;
                                 app.show_standalone_tools = false;
@@ -602,27 +611,46 @@ fn receive_update_check(
 
 fn receive_full_disk_scan(
     app: &mut App,
-    receiver: &mut Option<Receiver<Result<FullDiskScan, String>>>,
+    receiver: &mut Option<Receiver<Result<FullDiskScanProgress, String>>>,
 ) {
-    let message = receiver.as_ref().map(|channel| channel.try_recv());
-    match message {
-        Some(Ok(Ok(report))) => {
-            app.full_disk = Some(report);
-            app.full_disk_scanning = false;
-            app.full_disk_error = None;
-            *receiver = None;
+    let Some(channel) = receiver.as_ref() else {
+        return;
+    };
+
+    let mut finished = false;
+    loop {
+        match channel.try_recv() {
+            Ok(Ok(progress)) => {
+                app.full_disk = Some(progress.report);
+                app.full_disk_phase = progress.phase;
+                app.full_disk_completed = progress.completed;
+                app.full_disk_total = progress.total;
+                app.full_disk_error = None;
+                if progress.finished {
+                    app.full_disk_scanning = false;
+                    finished = true;
+                    break;
+                }
+            }
+            Ok(Err(error)) => {
+                app.full_disk_scanning = false;
+                app.full_disk_error = Some(error);
+                finished = true;
+                break;
+            }
+            Err(TryRecvError::Disconnected) => {
+                if app.full_disk_scanning {
+                    app.full_disk_scanning = false;
+                    app.full_disk_error = Some("full-disk scan stopped unexpectedly".to_owned());
+                }
+                finished = true;
+                break;
+            }
+            Err(TryRecvError::Empty) => break,
         }
-        Some(Ok(Err(error))) => {
-            app.full_disk_scanning = false;
-            app.full_disk_error = Some(error);
-            *receiver = None;
-        }
-        Some(Err(TryRecvError::Disconnected)) => {
-            app.full_disk_scanning = false;
-            app.full_disk_error = Some("full-disk scan stopped unexpectedly".to_owned());
-            *receiver = None;
-        }
-        Some(Err(TryRecvError::Empty)) | None => {}
+    }
+    if finished {
+        *receiver = None;
     }
 }
 

@@ -85,6 +85,9 @@ pub(crate) struct App {
     pub(crate) full_disk_error: Option<String>,
     pub(crate) show_full_disk: bool,
     pub(crate) full_disk_cursor: usize,
+    pub(crate) full_disk_phase: String,
+    pub(crate) full_disk_completed: usize,
+    pub(crate) full_disk_total: usize,
     pub(crate) show_global_tools: bool,
     pub(crate) global_tools: Option<GlobalToolScan>,
     pub(crate) global_tools_scanning: bool,
@@ -147,6 +150,9 @@ impl App {
             full_disk_error: None,
             show_full_disk: false,
             full_disk_cursor: 0,
+            full_disk_phase: String::new(),
+            full_disk_completed: 0,
+            full_disk_total: 0,
             show_global_tools: false,
             global_tools: None,
             global_tools_scanning: false,
@@ -198,6 +204,9 @@ impl App {
         self.confirm_text.clear();
         self.show_full_disk = false;
         self.full_disk_cursor = 0;
+        self.full_disk_phase.clear();
+        self.full_disk_completed = 0;
+        self.full_disk_total = 0;
         self.show_global_tools = false;
         self.global_tools = None;
         self.global_tools_scanning = false;

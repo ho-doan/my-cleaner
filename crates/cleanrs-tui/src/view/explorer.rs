@@ -19,10 +19,15 @@ pub(crate) fn render_full_disk(frame: &mut Frame, app: &App, area: ratatui::layo
     ));
 
     if app.full_disk_scanning {
-        items.push(ListItem::new("Scanning root disk and HOME in background…"));
-    } else if let Some(error) = &app.full_disk_error {
+        items.push(ListItem::new(format!(
+            "Scanning {} ({}/{}) — partial results update below…",
+            app.full_disk_phase, app.full_disk_completed, app.full_disk_total
+        )));
+    }
+    if let Some(error) = &app.full_disk_error {
         items.push(ListItem::new(format!("Scan error: {error}")));
-    } else if let Some(report) = &app.full_disk {
+    }
+    if let Some(report) = &app.full_disk {
         let render_entry = |entry: &cleanrs_core::DiskScanEntry| {
             let (marker, color) = if entry.inaccessible_paths > 0 {
                 ("PARTIAL", Color::Yellow)
@@ -115,7 +120,7 @@ pub(crate) fn render_full_disk(frame: &mut Frame, app: &App, area: ratatui::layo
                 Style::default().fg(Color::Yellow),
             ),
         ])));
-    } else {
+    } else if !app.full_disk_scanning {
         items.push(ListItem::new("Press [f] to start a full-disk scan."));
     }
 

@@ -27,8 +27,9 @@ pub use model::{Category, CleanMethod, CleanOptions, CleanResult, CleanTarget, R
 pub use platform::config::default_scan_root;
 pub use report::{all_reporters, scan_all_reports, ReadOnlyScan, ReadOnlyTarget, ReportOnly};
 pub use scanner::{
-    can_delete_path, dir_size, full_disk_scan, is_protected_path, scan_directory, DirectoryScan,
-    DirectoryScanEntry, DirectorySuggestion, DiskScanEntry, FullDiskScan, VolumeUsage,
+    can_delete_path, dir_size, full_disk_scan, full_disk_scan_with_progress, is_protected_path,
+    scan_directory, DirectoryScan, DirectoryScanEntry, DirectorySuggestion, DiskScanEntry,
+    FullDiskScan, FullDiskScanProgress, VolumeUsage,
 };
 pub use standalone::{
     remove_standalone_tool, scan_standalone_tools, StandaloneTool, StandaloneToolResult,

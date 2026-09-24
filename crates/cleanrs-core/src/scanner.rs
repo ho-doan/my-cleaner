@@ -40,7 +40,7 @@ pub struct DiskScanEntry {
     pub read_only: bool,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct FullDiskScan {
     pub root: PathBuf,
     pub root_entries: Vec<DiskScanEntry>,
@@ -51,6 +51,15 @@ pub struct FullDiskScan {
     /// They are surfaced as read-only instead of becoming delete targets.
     pub readonly_paths: Vec<PathBuf>,
     pub inaccessible_paths: usize,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct FullDiskScanProgress {
+    pub phase: String,
+    pub completed: usize,
+    pub total: usize,
+    pub report: FullDiskScan,
+    pub finished: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -117,32 +126,112 @@ pub fn dir_size(path: &Path) -> Result<u64> {
 /// mount points and virtual filesystems are excluded to avoid traversing areas
 /// that are not useful cleanup targets or may block indefinitely.
 pub fn full_disk_scan(root: &Path, limit: usize) -> Result<FullDiskScan> {
+    full_disk_scan_with_progress(root, limit, |_| {})
+}
+
+/// Scan the full inventory while publishing a cloned partial report after
+/// each root, protected/mounted, or HOME child completes.
+pub fn full_disk_scan_with_progress<F>(
+    root: &Path,
+    limit: usize,
+    mut on_progress: F,
+) -> Result<FullDiskScan>
+where
+    F: FnMut(FullDiskScanProgress),
+{
     if !root.is_dir() {
         anyhow::bail!("full-disk scan root is not a directory: {}", root.display());
     }
 
     let excluded_root_paths = config::excluded_root_paths(root);
     let readonly_paths = config::readonly_inventory_paths(root);
-    let (mut root_entries, root_inaccessible) = scan_children(root, &excluded_root_paths)
-        .with_context(|| format!("scan {}", root.display()))?;
-    let (mut readonly_entries, readonly_inaccessible) = scan_readonly_paths(&readonly_paths);
-    root_entries.sort_by_key(|entry| std::cmp::Reverse(entry.size_bytes));
-    root_entries.truncate(limit);
-    readonly_entries.sort_by_key(|entry| entry.path.clone());
-
-    let (home_entries, home_inaccessible) = match config::home_dir() {
-        Some(home) => scan_home_entries(&home, limit)?,
-        None => (Vec::new(), 0),
+    let mut report = FullDiskScan {
+        root: root.to_path_buf(),
+        root_entries: Vec::new(),
+        home_entries: Vec::new(),
+        readonly_entries: Vec::new(),
+        readonly_paths,
+        inaccessible_paths: 0,
     };
 
-    Ok(FullDiskScan {
-        root: root.to_path_buf(),
-        root_entries,
-        home_entries,
-        readonly_entries,
-        readonly_paths,
-        inaccessible_paths: root_inaccessible + home_inaccessible + readonly_inaccessible,
-    })
+    let (mut root_entries, _) = scan_children_with_progress(
+        root,
+        &excluded_root_paths,
+        |entry, inaccessible, completed, total| {
+            if let Some(entry) = entry {
+                report.root_entries.push(entry);
+                trim_entries(&mut report.root_entries, limit);
+            }
+            report.inaccessible_paths += inaccessible;
+            emit_progress(&mut on_progress, &report, "root", completed, total, false);
+        },
+    )
+    .with_context(|| format!("scan {}", root.display()))?;
+    trim_entries(&mut root_entries, limit);
+    report.root_entries = root_entries;
+
+    let readonly_paths = report.readonly_paths.clone();
+    let (mut readonly_entries, _) = scan_readonly_paths_with_progress(
+        &readonly_paths,
+        |entry, inaccessible, completed, total| {
+            if let Some(entry) = entry {
+                report.readonly_entries.push(entry);
+                report
+                    .readonly_entries
+                    .sort_by_key(|entry| entry.path.clone());
+            }
+            report.inaccessible_paths += inaccessible;
+            emit_progress(
+                &mut on_progress,
+                &report,
+                "mounted volumes and protected paths",
+                completed,
+                total,
+                false,
+            );
+        },
+    );
+    readonly_entries.sort_by_key(|entry| entry.path.clone());
+    report.readonly_entries = readonly_entries;
+
+    if let Some(home) = config::home_dir() {
+        let (home_entries, _) = scan_home_entries_with_progress(
+            &home,
+            limit,
+            |entry, inaccessible, completed, total| {
+                if let Some(entry) = entry {
+                    report.home_entries.push(entry);
+                    trim_entries(&mut report.home_entries, limit);
+                }
+                report.inaccessible_paths += inaccessible;
+                emit_progress(&mut on_progress, &report, "HOME", completed, total, false);
+            },
+        )?;
+        report.home_entries = home_entries;
+        emit_progress(&mut on_progress, &report, "HOME", 1, 1, false);
+    }
+
+    emit_progress(&mut on_progress, &report, "complete", 1, 1, true);
+    Ok(report)
+}
+
+fn emit_progress<F>(
+    on_progress: &mut F,
+    report: &FullDiskScan,
+    phase: &str,
+    completed: usize,
+    total: usize,
+    finished: bool,
+) where
+    F: FnMut(FullDiskScanProgress),
+{
+    on_progress(FullDiskScanProgress {
+        phase: phase.to_owned(),
+        completed,
+        total,
+        report: report.clone(),
+        finished,
+    });
 }
 
 /// Returns whether a path belongs to a protected system or mount tree.
@@ -378,41 +467,83 @@ fn user_file_area(path: &Path) -> Option<&'static str> {
         })
 }
 
-fn scan_children(parent: &Path, excluded: &[PathBuf]) -> Result<(Vec<DiskScanEntry>, usize)> {
+fn scan_children_with_progress<F>(
+    parent: &Path,
+    excluded: &[PathBuf],
+    mut on_item: F,
+) -> Result<(Vec<DiskScanEntry>, usize)>
+where
+    F: FnMut(Option<DiskScanEntry>, usize, usize, usize),
+{
     let children = std::fs::read_dir(parent)?
         .filter_map(|entry| entry.ok().map(|entry| entry.path()))
         .collect::<Vec<_>>();
+    let total = children.len();
+    let (sender, receiver) = std::sync::mpsc::channel();
 
-    let results = children
-        .into_par_iter()
-        .map(|path| {
-            if excluded.contains(&path) {
-                return (None, 0usize);
+    Ok(std::thread::scope(|scope| {
+        scope.spawn(move || {
+            children
+                .into_par_iter()
+                .for_each_with(sender, |sender, path| {
+                    if excluded.contains(&path) {
+                        let _ = sender.send((None, 0usize));
+                        return;
+                    }
+
+                    let (size_bytes, inaccessible) = tolerant_dir_size(&path);
+                    let read_only = is_protected_path(&path);
+                    let entry = (size_bytes > 0).then_some(DiskScanEntry {
+                        path: path.clone(),
+                        size_bytes,
+                        volume_usage: volume_usage(&path),
+                        inaccessible_paths: inaccessible,
+                        read_only,
+                    });
+                    let _ = sender.send((entry, inaccessible));
+                });
+        });
+
+        let mut entries = Vec::new();
+        let mut inaccessible = 0;
+        let mut completed = 0;
+        for (entry, blocked) in receiver {
+            completed += 1;
+            inaccessible += blocked;
+            if let Some(item) = entry.as_ref() {
+                entries.push(item.clone());
             }
+            on_item(entry, blocked, completed, total);
+        }
+        (entries, inaccessible)
+    }))
+}
 
-            let (size_bytes, inaccessible) = tolerant_dir_size(&path);
-            let read_only = is_protected_path(&path);
-            let entry = (size_bytes > 0).then_some(DiskScanEntry {
-                path: path.clone(),
-                size_bytes,
-                volume_usage: volume_usage(&path),
-                inaccessible_paths: inaccessible,
-                read_only,
-            });
-            (entry, inaccessible)
-        })
-        .collect::<Vec<_>>();
-
-    let inaccessible = results.iter().map(|(_, count)| count).sum();
-    let entries = results.into_iter().filter_map(|(entry, _)| entry).collect();
-    Ok((entries, inaccessible))
+fn trim_entries(entries: &mut Vec<DiskScanEntry>, limit: usize) {
+    entries.sort_by_key(|entry| std::cmp::Reverse(entry.size_bytes));
+    entries.truncate(limit);
 }
 
 /// Keep the largest HOME entries while always retaining the standard user
 /// folders. A small Documents folder should remain inspectable even when the
 /// HOME directory contains more than `limit` larger caches or toolchains.
+#[cfg(test)]
 fn scan_home_entries(home: &Path, limit: usize) -> Result<(Vec<DiskScanEntry>, usize)> {
-    let (mut entries, mut inaccessible) = scan_children(home, &[])?;
+    scan_home_entries_with_progress(home, limit, |_, _, _, _| {})
+}
+
+fn scan_home_entries_with_progress<F>(
+    home: &Path,
+    limit: usize,
+    mut on_item: F,
+) -> Result<(Vec<DiskScanEntry>, usize)>
+where
+    F: FnMut(Option<DiskScanEntry>, usize, usize, usize),
+{
+    let (mut entries, mut inaccessible) =
+        scan_children_with_progress(home, &[], |entry, blocked, completed, total| {
+            on_item(entry, blocked, completed, total);
+        })?;
     let standard_paths = STANDARD_HOME_DIRECTORIES
         .iter()
         .map(|name| home.join(name))
@@ -466,26 +597,48 @@ fn readonly_directory_entry(path: PathBuf) -> (DirectoryScanEntry, usize) {
     )
 }
 
+#[cfg(test)]
 fn scan_readonly_paths(paths: &[PathBuf]) -> (Vec<DiskScanEntry>, usize) {
-    let results = paths
-        .par_iter()
-        .map(|path| {
-            let (size_bytes, inaccessible) = tolerant_dir_size(path);
-            (
-                DiskScanEntry {
+    scan_readonly_paths_with_progress(paths, |_, _, _, _| {})
+}
+
+fn scan_readonly_paths_with_progress<F>(
+    paths: &[PathBuf],
+    mut on_item: F,
+) -> (Vec<DiskScanEntry>, usize)
+where
+    F: FnMut(Option<DiskScanEntry>, usize, usize, usize),
+{
+    let total = paths.len();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let paths = paths.to_vec();
+    std::thread::scope(|scope| {
+        scope.spawn(move || {
+            paths.into_par_iter().for_each_with(sender, |sender, path| {
+                let (size_bytes, inaccessible) = tolerant_dir_size(&path);
+                let entry = DiskScanEntry {
                     path: path.clone(),
                     size_bytes,
-                    volume_usage: volume_usage(path),
+                    volume_usage: volume_usage(&path),
                     inaccessible_paths: inaccessible,
                     read_only: true,
-                },
-                inaccessible,
-            )
-        })
-        .collect::<Vec<_>>();
-    let inaccessible = results.iter().map(|(_, count)| count).sum();
-    let entries = results.into_iter().map(|(entry, _)| entry).collect();
-    (entries, inaccessible)
+                };
+                let _ = sender.send((Some(entry), inaccessible));
+            });
+        });
+        let mut entries = Vec::new();
+        let mut inaccessible = 0;
+        let mut completed = 0;
+        for (entry, blocked) in receiver {
+            completed += 1;
+            inaccessible += blocked;
+            if let Some(item) = entry.as_ref() {
+                entries.push(item.clone());
+            }
+            on_item(entry, blocked, completed, total);
+        }
+        (entries, inaccessible)
+    })
 }
 
 fn tolerant_dir_size(path: &Path) -> (u64, usize) {
@@ -529,7 +682,8 @@ mod tests {
     use super::is_protected_path;
     use super::{
         config, dir_size, directory_suggestion, file_suggestion, readonly_directory_entry,
-        scan_directory, scan_home_entries, scan_readonly_paths, STANDARD_HOME_DIRECTORIES,
+        scan_children_with_progress, scan_directory, scan_home_entries, scan_readonly_paths,
+        STANDARD_HOME_DIRECTORIES,
     };
     use std::fs;
     use std::path::Path;
@@ -552,6 +706,29 @@ mod tests {
             dir_size(&root.path().join("missing")).expect("directory size"),
             0
         );
+    }
+
+    #[test]
+    fn child_scan_reports_items_as_they_finish() {
+        let root = tempdir().expect("temporary directory");
+        for name in ["first", "second"] {
+            let directory = root.path().join(name);
+            fs::create_dir(&directory).expect("child directory");
+            fs::write(directory.join("data.bin"), vec![0_u8; 8]).expect("child data");
+        }
+
+        let mut progress = Vec::new();
+        let (entries, inaccessible) =
+            scan_children_with_progress(root.path(), &[], |entry, blocked, completed, total| {
+                progress.push((entry.is_some(), blocked, completed, total));
+            })
+            .expect("child scan");
+
+        assert_eq!(inaccessible, 0);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(progress.len(), 2);
+        assert!(progress.iter().all(|(_, _, _, total)| *total == 2));
+        assert_eq!(progress.last().map(|item| item.2), Some(2));
     }
 
     #[test]

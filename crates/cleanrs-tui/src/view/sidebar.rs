@@ -151,6 +151,13 @@ pub(crate) fn render_sidebar(frame: &mut Frame, app: &App, area: ratatui::layout
             .add_modifier(Modifier::BOLD),
     )));
     if app.full_disk_scanning {
+        lines.push(Line::from(Span::styled(
+            format!(
+                "Scanning {} ({}/{})…",
+                app.full_disk_phase, app.full_disk_completed, app.full_disk_total
+            ),
+            Style::default().fg(Color::Yellow),
+        )));
         if matches!(app.mode, Mode::Cleaning) {
             lines.push(Line::from(Span::styled(
                 "Background scan · read-only",
@@ -160,13 +167,9 @@ pub(crate) fn render_sidebar(frame: &mut Frame, app: &App, area: ratatui::layout
                 "Cleanup independent · snapshot may be stale",
                 Style::default().fg(Color::Gray),
             )));
-        } else {
-            lines.push(Line::from(Span::styled(
-                "Scanning root + HOME…",
-                Style::default().fg(Color::Yellow),
-            )));
         }
-    } else if let Some(error) = &app.full_disk_error {
+    }
+    if let Some(error) = &app.full_disk_error {
         lines.push(Line::from(format!("Error: {error}")));
     } else if let Some(report) = &app.full_disk {
         let root_total = report
@@ -219,7 +222,7 @@ pub(crate) fn render_sidebar(frame: &mut Frame, app: &App, area: ratatui::layout
             "Blocked: {}",
             report.inaccessible_paths
         )));
-    } else {
+    } else if !app.full_disk_scanning {
         lines.push(Line::from("Press [f] to scan"));
     }
     if app.show_full_disk {
