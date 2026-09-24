@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use fs2::{available_space, total_space};
 use jwalk::WalkDir;
 use rayon::prelude::*;
 use serde::Serialize;
@@ -10,9 +11,27 @@ use crate::platform::config;
 const STANDARD_HOME_DIRECTORIES: [&str; 3] = config::STANDARD_HOME_DIRECTORIES;
 
 #[derive(Clone, Debug, Serialize)]
+pub struct VolumeUsage {
+    pub total_bytes: u64,
+    pub available_bytes: u64,
+}
+
+impl VolumeUsage {
+    pub fn used_bytes(&self) -> u64 {
+        self.total_bytes.saturating_sub(self.available_bytes)
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
 pub struct DiskScanEntry {
     pub path: PathBuf,
+    /// Bytes visible through recursive directory enumeration.
     pub size_bytes: u64,
+    /// Filesystem-level usage, including metadata/snapshots and inaccessible
+    /// files. Present for mounted volume roots.
+    pub volume_usage: Option<VolumeUsage>,
+    /// Number of traversal or metadata failures below this entry.
+    pub inaccessible_paths: usize,
     /// The path is protected by the system-safety policy.
     ///
     /// A `false` value does not make an inventory row directly deletable: the
@@ -46,6 +65,7 @@ pub struct DirectorySuggestion {
 pub struct DirectoryScanEntry {
     pub path: PathBuf,
     pub size_bytes: u64,
+    pub inaccessible_paths: usize,
     pub is_dir: bool,
     pub read_only: bool,
     pub allowlisted: bool,
@@ -56,6 +76,7 @@ pub struct DirectoryScanEntry {
 pub struct DirectoryScan {
     pub path: PathBuf,
     pub entries: Vec<DirectoryScanEntry>,
+    pub volume_usage: Option<VolumeUsage>,
     pub is_git_repo: bool,
     pub git_dirty: bool,
     pub inaccessible_paths: usize,
@@ -100,9 +121,10 @@ pub fn full_disk_scan(root: &Path, limit: usize) -> Result<FullDiskScan> {
         anyhow::bail!("full-disk scan root is not a directory: {}", root.display());
     }
 
-    let readonly_paths = config::excluded_root_paths(root);
-    let (mut root_entries, root_inaccessible) =
-        scan_children(root, &readonly_paths).with_context(|| format!("scan {}", root.display()))?;
+    let excluded_root_paths = config::excluded_root_paths(root);
+    let readonly_paths = config::readonly_inventory_paths(root);
+    let (mut root_entries, root_inaccessible) = scan_children(root, &excluded_root_paths)
+        .with_context(|| format!("scan {}", root.display()))?;
     let (mut readonly_entries, readonly_inaccessible) = scan_readonly_paths(&readonly_paths);
     root_entries.sort_by_key(|entry| std::cmp::Reverse(entry.size_bytes));
     root_entries.truncate(limit);
@@ -144,6 +166,18 @@ pub fn can_delete_path(path: &Path) -> bool {
         .map(|metadata| metadata.file_type().is_file())
         .unwrap_or(false);
     is_file && file_suggestion(path).is_some_and(|suggestion| suggestion.can_delete)
+}
+
+fn volume_usage(path: &Path) -> Option<VolumeUsage> {
+    if !config::is_volume_root(path) {
+        return None;
+    }
+    let total_bytes = total_space(path).ok()?;
+    let available_bytes = available_space(path).ok()?.min(total_bytes);
+    Some(VolumeUsage {
+        total_bytes,
+        available_bytes,
+    })
 }
 
 /// Scan one directory level for an interactive, read-only explorer.
@@ -203,6 +237,7 @@ pub fn scan_directory(path: &Path, limit: usize) -> Result<DirectoryScan> {
                 Some(DirectoryScanEntry {
                     path: child,
                     size_bytes,
+                    inaccessible_paths: inaccessible,
                     is_dir,
                     read_only,
                     allowlisted,
@@ -232,6 +267,7 @@ pub fn scan_directory(path: &Path, limit: usize) -> Result<DirectoryScan> {
     Ok(DirectoryScan {
         path: path.to_path_buf(),
         entries,
+        volume_usage: volume_usage(path),
         is_git_repo,
         git_dirty,
         inaccessible_paths,
@@ -357,8 +393,10 @@ fn scan_children(parent: &Path, excluded: &[PathBuf]) -> Result<(Vec<DiskScanEnt
             let (size_bytes, inaccessible) = tolerant_dir_size(&path);
             let read_only = is_protected_path(&path);
             let entry = (size_bytes > 0).then_some(DiskScanEntry {
-                path,
+                path: path.clone(),
                 size_bytes,
+                volume_usage: volume_usage(&path),
+                inaccessible_paths: inaccessible,
                 read_only,
             });
             (entry, inaccessible)
@@ -374,7 +412,7 @@ fn scan_children(parent: &Path, excluded: &[PathBuf]) -> Result<(Vec<DiskScanEnt
 /// folders. A small Documents folder should remain inspectable even when the
 /// HOME directory contains more than `limit` larger caches or toolchains.
 fn scan_home_entries(home: &Path, limit: usize) -> Result<(Vec<DiskScanEntry>, usize)> {
-    let (mut entries, inaccessible) = scan_children(home, &[])?;
+    let (mut entries, mut inaccessible) = scan_children(home, &[])?;
     let standard_paths = STANDARD_HOME_DIRECTORIES
         .iter()
         .map(|name| home.join(name))
@@ -385,10 +423,13 @@ fn scan_home_entries(home: &Path, limit: usize) -> Result<(Vec<DiskScanEntry>, u
         if entries.iter().any(|entry| entry.path == *path) {
             continue;
         }
-        let (size_bytes, _) = tolerant_dir_size(path);
+        let (size_bytes, inaccessible_paths) = tolerant_dir_size(path);
+        inaccessible += inaccessible_paths;
         entries.push(DiskScanEntry {
             path: path.clone(),
             size_bytes,
+            volume_usage: volume_usage(path),
+            inaccessible_paths,
             read_only: false,
         });
     }
@@ -415,6 +456,7 @@ fn readonly_directory_entry(path: PathBuf) -> (DirectoryScanEntry, usize) {
         DirectoryScanEntry {
             path,
             size_bytes,
+            inaccessible_paths: inaccessible,
             is_dir: true,
             read_only: true,
             allowlisted: false,
@@ -433,6 +475,8 @@ fn scan_readonly_paths(paths: &[PathBuf]) -> (Vec<DiskScanEntry>, usize) {
                 DiskScanEntry {
                     path: path.clone(),
                     size_bytes,
+                    volume_usage: volume_usage(path),
+                    inaccessible_paths: inaccessible,
                     read_only: true,
                 },
                 inaccessible,
@@ -451,10 +495,17 @@ fn tolerant_dir_size(path: &Path) -> (u64, usize) {
         }
     }
 
+    let mut traversal_errors = 0usize;
     let entries = WalkDir::new(path)
         .follow_links(false)
         .into_iter()
-        .filter_map(Result::ok)
+        .filter_map(|result| match result {
+            Ok(entry) => Some(entry),
+            Err(_) => {
+                traversal_errors += 1;
+                None
+            }
+        })
         .collect::<Vec<_>>();
 
     let (size, metadata_errors) = entries
@@ -469,7 +520,7 @@ fn tolerant_dir_size(path: &Path) -> (u64, usize) {
             |left, right| (left.0 + right.0, left.1 + right.1),
         );
 
-    (size, metadata_errors)
+    (size, traversal_errors + metadata_errors)
 }
 
 #[cfg(test)]

@@ -146,7 +146,7 @@ pub(crate) fn move_to_trash(path: &Path) -> Result<()> {
         let mut context = trash::TrashContext::new();
         context.set_delete_method(DeleteMethod::NsFileManager);
         context.delete(path)?;
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(not(target_os = "macos"))]

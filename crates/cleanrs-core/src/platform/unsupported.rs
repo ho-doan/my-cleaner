@@ -25,6 +25,14 @@ pub mod config {
         Vec::new()
     }
 
+    pub fn readonly_inventory_paths(root: &Path) -> Vec<PathBuf> {
+        excluded_root_paths(root)
+    }
+
+    pub fn is_volume_root(_path: &Path) -> bool {
+        false
+    }
+
     pub fn is_protected_path(_path: &Path) -> bool {
         false
     }

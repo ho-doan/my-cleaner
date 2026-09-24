@@ -196,6 +196,25 @@ pub(crate) fn render_sidebar(frame: &mut Frame, app: &App, area: ratatui::layout
             "Protected: {}",
             format_size(protected_total, DECIMAL)
         )));
+        let mounted_visible = report
+            .readonly_entries
+            .iter()
+            .filter(|entry| entry.volume_usage.is_some())
+            .map(|entry| entry.size_bytes)
+            .sum::<u64>();
+        let mounted_used = report
+            .readonly_entries
+            .iter()
+            .filter_map(|entry| entry.volume_usage.as_ref())
+            .map(|usage| usage.used_bytes())
+            .sum::<u64>();
+        if mounted_used > 0 {
+            lines.push(Line::from(format!(
+                "Mounted: visible {} · used {}",
+                format_size(mounted_visible, DECIMAL),
+                format_size(mounted_used, DECIMAL)
+            )));
+        }
         lines.push(Line::from(format!(
             "Blocked: {}",
             report.inaccessible_paths

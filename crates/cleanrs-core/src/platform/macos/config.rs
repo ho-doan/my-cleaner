@@ -30,6 +30,28 @@ pub fn excluded_root_paths(root: &Path) -> Vec<PathBuf> {
     .collect()
 }
 
+pub fn readonly_inventory_paths(root: &Path) -> Vec<PathBuf> {
+    let mut paths = excluded_root_paths(root);
+    let volumes = root.join("Volumes");
+    if root == Path::new("/") {
+        if let Ok(entries) = std::fs::read_dir(&volumes) {
+            let mounted_volumes = entries
+                .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+                .filter(|path| path.is_dir())
+                .collect::<Vec<_>>();
+            if !mounted_volumes.is_empty() {
+                paths.retain(|path| path != &volumes);
+                paths.extend(mounted_volumes);
+            }
+        }
+    }
+    paths
+}
+
+pub fn is_volume_root(path: &Path) -> bool {
+    path.parent() == Some(Path::new("/Volumes")) && path != Path::new("/Volumes")
+}
+
 pub fn is_protected_path(path: &Path) -> bool {
     [
         "/System", "/Library", "/Volumes", "/private", "/dev", "/cores", "/usr", "/bin", "/sbin",

@@ -72,6 +72,17 @@ pub fn excluded_root_paths(_root: &Path) -> Vec<PathBuf> {
     .collect()
 }
 
+pub fn readonly_inventory_paths(root: &Path) -> Vec<PathBuf> {
+    excluded_root_paths(root)
+}
+
+pub fn is_volume_root(path: &Path) -> bool {
+    let value = path.to_string_lossy();
+    value.len() == 3
+        && value.as_bytes().get(1) == Some(&b':')
+        && matches!(value.as_bytes().get(2), Some(b'\\' | b'/'))
+}
+
 pub fn is_protected_path(path: &Path) -> bool {
     let protected = [
         std::env::var_os("SystemRoot").map(PathBuf::from),

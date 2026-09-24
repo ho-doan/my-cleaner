@@ -24,12 +24,30 @@ pub(crate) fn render_full_disk(frame: &mut Frame, app: &App, area: ratatui::layo
         items.push(ListItem::new(format!("Scan error: {error}")));
     } else if let Some(report) = &app.full_disk {
         let render_entry = |entry: &cleanrs_core::DiskScanEntry| {
-            let (marker, color) = if entry.read_only {
+            let (marker, color) = if entry.inaccessible_paths > 0 {
+                ("PARTIAL", Color::Yellow)
+            } else if entry.read_only {
                 ("READONLY", Color::Red)
             } else if entry.path.is_dir() {
                 ("DIR", Color::Cyan)
             } else {
                 ("FILE", Color::Gray)
+            };
+            let volume = entry
+                .volume_usage
+                .as_ref()
+                .map(|usage| {
+                    format!(
+                        "  · volume used {} / {}",
+                        format_size(usage.used_bytes(), DECIMAL),
+                        format_size(usage.total_bytes, DECIMAL)
+                    )
+                })
+                .unwrap_or_default();
+            let blocked = if entry.inaccessible_paths > 0 {
+                format!("  · blocked {}", entry.inaccessible_paths)
+            } else {
+                String::new()
             };
             ListItem::new(Line::from(vec![
                 Span::styled(
@@ -37,7 +55,7 @@ pub(crate) fn render_full_disk(frame: &mut Frame, app: &App, area: ratatui::layo
                     Style::default().fg(Color::Gray),
                 ),
                 Span::styled(format!("[{marker}]"), Style::default().fg(color)),
-                Span::raw(format!("  {}", entry.path.display())),
+                Span::raw(format!("  {}{}{}", entry.path.display(), volume, blocked)),
             ]))
         };
         items.push(ListItem::new(Span::styled(
@@ -163,8 +181,15 @@ pub(crate) fn render_directory(frame: &mut Frame, app: &App, area: ratatui::layo
             );
             selected_index = Some(entry_start + app.directory_cursor);
         }
+        if let Some(usage) = &report.volume_usage {
+            items.push(ListItem::new(format!(
+                "Volume used: {} / {} · visible child bytes may be lower when snapshots or blocked paths exist",
+                format_size(usage.used_bytes(), DECIMAL),
+                format_size(usage.total_bytes, DECIMAL)
+            )));
+        }
         items.push(ListItem::new(format!(
-            "Inaccessible: {}",
+            "Blocked during recursive scan: {}",
             report.inaccessible_paths
         )));
     } else {
@@ -192,7 +217,9 @@ fn directory_list_item(
     entry: &cleanrs_core::DirectoryScanEntry,
     width: usize,
 ) -> ListItem<'static> {
-    let (marker, color) = if entry.read_only {
+    let (marker, color) = if entry.inaccessible_paths > 0 {
+        ("PARTIAL", Color::Yellow)
+    } else if entry.read_only {
         ("READONLY", Color::Red)
     } else if entry.allowlisted {
         ("ALLOW", Color::Green)
@@ -216,7 +243,12 @@ fn directory_list_item(
         .as_ref()
         .map(|suggestion| format!(" — {}", suggestion.reason))
         .unwrap_or_default();
-    let full_text = format!("[{marker}]  {size}  {path}{reason}");
+    let blocked = if entry.inaccessible_paths > 0 {
+        format!(" — blocked paths: {}", entry.inaccessible_paths)
+    } else {
+        String::new()
+    };
+    let full_text = format!("[{marker}]  {size}  {path}{reason}{blocked}");
 
     if full_text.chars().count() <= width {
         return ListItem::new(Line::from(vec![

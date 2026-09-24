@@ -406,15 +406,24 @@ fn print_full_disk_table(report: &FullDiskScan) {
     ] {
         let mut table = Table::new();
         table.load_preset(UTF8_FULL);
-        table.set_header([label, "State", "Size", "Path"]);
+        table.set_header([
+            label,
+            "State",
+            "Visible files",
+            "Volume used",
+            "Blocked",
+            "Path",
+        ]);
         if entries.is_empty() {
-            table.add_row(["-", "READONLY", "0 B", "No readable entries"]);
+            table.add_row(["-", "READONLY", "0 B", "-", "0", "No readable entries"]);
         } else {
             for entry in entries {
                 table.add_row([
                     label.to_owned(),
-                    if entry.read_only { "READONLY" } else { "-" }.to_owned(),
+                    disk_entry_state(entry).to_owned(),
                     format_size(entry.size_bytes, DECIMAL),
+                    disk_volume_used(entry),
+                    entry.inaccessible_paths.to_string(),
                     entry.path.display().to_string(),
                 ]);
             }
@@ -425,17 +434,44 @@ fn print_full_disk_table(report: &FullDiskScan) {
     if !report.readonly_entries.is_empty() {
         let mut table = Table::new();
         table.load_preset(UTF8_FULL);
-        table.set_header(["State", "Reason", "Size", "Path"]);
+        table.set_header([
+            "State",
+            "Reason",
+            "Visible files",
+            "Volume used",
+            "Blocked",
+            "Path",
+        ]);
         for entry in &report.readonly_entries {
             table.add_row([
-                "READONLY".to_owned(),
+                disk_entry_state(entry).to_owned(),
                 "system/mount excluded".to_owned(),
                 format_size(entry.size_bytes, DECIMAL),
+                disk_volume_used(entry),
+                entry.inaccessible_paths.to_string(),
                 entry.path.display().to_string(),
             ]);
         }
         println!("{table}");
     }
+}
+
+fn disk_entry_state(entry: &cleanrs_core::DiskScanEntry) -> &'static str {
+    if entry.inaccessible_paths > 0 {
+        "PARTIAL"
+    } else if entry.read_only {
+        "READONLY"
+    } else {
+        "-"
+    }
+}
+
+fn disk_volume_used(entry: &cleanrs_core::DiskScanEntry) -> String {
+    entry
+        .volume_usage
+        .as_ref()
+        .map(|usage| format_size(usage.used_bytes(), DECIMAL))
+        .unwrap_or_else(|| "-".to_owned())
 }
 
 fn print_clean_output(output: &CleanOutput) {
