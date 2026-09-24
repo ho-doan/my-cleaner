@@ -189,6 +189,18 @@ an individual system-temp file under `/private/tmp` or `/private/var/tmp`, then
 press x to move it to Trash. System roots, mounted volumes, databases, swap,
 and sensitive folders remain review-only.
 
+When Explorer is inside a Git repository, cleanrs evaluates the applicable
+`.gitignore` rules (including a standalone `.gitignore` in a non-repository
+folder). Matching files and folders are marked `GITIGNORE`, moved ahead of
+ordinary size-only entries, and remain explicit, user-confirmed Trash
+candidates; `.gitignore` is a suggestion source, not an automatic deletion
+policy. On macOS, known Apple-managed user data locations are also surfaced as
+`APPLE` suggestions, including app caches/logs, Mail Downloads, iPhone/iPad
+backups, Xcode DerivedData and Archives, CoreSimulator caches, and Xcode
+device-support versions. The standard Desktop, Documents, and Downloads
+contents remain individually reviewable. iCloud Drive data is not treated as a
+bulk-delete target because deleting it can sync to other devices.
+
 For an exact directory that needs explicit review, press `w` in the Explorer
 to toggle it in the delete allowlist at
 `~/.config/cleanrs/whitelist.toml`. Allowlisting only makes that exact

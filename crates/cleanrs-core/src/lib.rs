@@ -29,7 +29,7 @@ pub use report::{all_reporters, scan_all_reports, ReadOnlyScan, ReadOnlyTarget, 
 pub use scanner::{
     can_delete_path, dir_size, full_disk_scan, full_disk_scan_with_progress, is_protected_path,
     scan_directory, DirectoryScan, DirectoryScanEntry, DirectorySuggestion, DiskScanEntry,
-    FullDiskScan, FullDiskScanProgress, VolumeUsage,
+    FullDiskScan, FullDiskScanProgress, SuggestionKind, VolumeUsage,
 };
 pub use standalone::{
     remove_standalone_tool, scan_standalone_tools, StandaloneTool, StandaloneToolResult,

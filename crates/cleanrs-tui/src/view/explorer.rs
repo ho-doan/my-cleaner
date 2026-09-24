@@ -176,8 +176,15 @@ pub(crate) fn render_directory(frame: &mut Frame, app: &App, area: ratatui::layo
             "Git: clean — generated folders may be regenerated"
         };
         items.push(ListItem::new(git_status));
+        if let Some(ignore_file) = &report.gitignore_file {
+            items.push(ListItem::new(format!(
+                "Git ignore: {} · {} match(es) prioritized",
+                ignore_file.display(),
+                report.gitignore_matches
+            )));
+        }
         items.push(ListItem::new(
-            "› selects · Enter opens folders · [w] allowlist · [x] Trash SUGGEST items",
+            "› selects · Enter opens folders · [w] allowlist · [x] Trash GITIGNORE/APPLE/SUGGEST items",
         ));
         let entry_start = items.len();
         if report.entries.is_empty() {
@@ -232,20 +239,8 @@ fn directory_list_item(
         ("PARTIAL", Color::Yellow)
     } else if entry.read_only {
         ("READONLY", Color::Red)
-    } else if entry.allowlisted {
-        ("ALLOW", Color::Green)
-    } else if entry
-        .suggestion
-        .as_ref()
-        .is_some_and(|suggestion| suggestion.can_delete)
-    {
-        ("SUGGEST", Color::Green)
-    } else if entry.suggestion.is_some() {
-        ("REVIEW", Color::Yellow)
-    } else if entry.is_dir {
-        ("DIR", Color::Cyan)
     } else {
-        ("FILE", Color::Gray)
+        suggestion_marker(entry)
     };
     let size = format_size(entry.size_bytes, DECIMAL);
     let path = entry.path.display().to_string();
@@ -293,4 +288,30 @@ fn directory_list_item(
         ])
     }));
     ListItem::new(lines)
+}
+
+fn suggestion_marker(entry: &cleanrs_core::DirectoryScanEntry) -> (&'static str, Color) {
+    if entry.allowlisted {
+        return ("ALLOW", Color::Green);
+    }
+    let Some(suggestion) = &entry.suggestion else {
+        return (
+            if entry.is_dir { "DIR" } else { "FILE" },
+            if entry.is_dir {
+                Color::Cyan
+            } else {
+                Color::Gray
+            },
+        );
+    };
+
+    match suggestion.kind {
+        cleanrs_core::SuggestionKind::GitIgnore => ("GITIGNORE", Color::Green),
+        cleanrs_core::SuggestionKind::Apple => ("APPLE", Color::Cyan),
+        cleanrs_core::SuggestionKind::Allowlist => ("ALLOW", Color::Green),
+        cleanrs_core::SuggestionKind::UserFile | cleanrs_core::SuggestionKind::Regenerable => {
+            ("SUGGEST", Color::Green)
+        }
+        cleanrs_core::SuggestionKind::Review => ("REVIEW", Color::Yellow),
+    }
 }

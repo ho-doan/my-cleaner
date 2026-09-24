@@ -3,8 +3,10 @@ use fs2::{available_space, total_space};
 use jwalk::WalkDir;
 use rayon::prelude::*;
 use serde::Serialize;
+use std::collections::{HashMap, HashSet};
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use crate::platform::config;
 
@@ -62,12 +64,24 @@ pub struct FullDiskScanProgress {
     pub finished: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SuggestionKind {
+    GitIgnore,
+    Apple,
+    Allowlist,
+    UserFile,
+    Regenerable,
+    Review,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct DirectorySuggestion {
     pub reason: String,
     /// Whether the explorer may move this whole directory to Trash after an
     /// explicit confirmation. Sensitive data remains suggestion-only.
     pub can_delete: bool,
+    pub kind: SuggestionKind,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -88,7 +102,14 @@ pub struct DirectoryScan {
     pub volume_usage: Option<VolumeUsage>,
     pub is_git_repo: bool,
     pub git_dirty: bool,
+    pub gitignore_file: Option<PathBuf>,
+    pub gitignore_matches: usize,
     pub inaccessible_paths: usize,
+}
+
+struct GitIgnoreContext {
+    ignore_file: PathBuf,
+    matched_paths: HashSet<PathBuf>,
 }
 
 /// Calculate the size of a file or directory.
@@ -289,6 +310,7 @@ pub fn scan_directory(path: &Path, limit: usize) -> Result<DirectoryScan> {
         .filter_map(|entry| entry.ok().map(|entry| entry.path()))
         .collect::<Vec<_>>();
     let (is_git_repo, git_dirty) = git_context(path);
+    let gitignore = gitignore_context(path, &children);
 
     let results = children
         .into_par_iter()
@@ -310,10 +332,13 @@ pub fn scan_directory(path: &Path, limit: usize) -> Result<DirectoryScan> {
                 (0, 0)
             };
             let allowlisted = is_dir && delete_allowlist.contains(&child);
+            let ignored_by_git = gitignore
+                .as_ref()
+                .is_some_and(|context| context.matched_paths.contains(&child));
             let suggestion = if is_dir {
-                directory_suggestion(&child, allowlisted)
+                directory_suggestion_with_context(&child, allowlisted, ignored_by_git)
             } else {
-                file_suggestion(&child)
+                file_suggestion_with_context(&child, ignored_by_git)
             };
             let protected_file_is_deletable = !is_dir
                 && is_protected_path(&child)
@@ -342,7 +367,13 @@ pub fn scan_directory(path: &Path, limit: usize) -> Result<DirectoryScan> {
         .into_iter()
         .filter_map(|(entry, _)| entry)
         .collect::<Vec<_>>();
-    entries.sort_by_key(|entry| (!entry.read_only, std::cmp::Reverse(entry.size_bytes)));
+    entries.sort_by(|left, right| {
+        left.read_only
+            .cmp(&right.read_only)
+            .then_with(|| suggestion_priority(right).cmp(&suggestion_priority(left)))
+            .then_with(|| right.size_bytes.cmp(&left.size_bytes))
+            .then_with(|| left.path.cmp(&right.path))
+    });
 
     let readonly_entries = entries
         .iter()
@@ -359,6 +390,13 @@ pub fn scan_directory(path: &Path, limit: usize) -> Result<DirectoryScan> {
         volume_usage: volume_usage(path),
         is_git_repo,
         git_dirty,
+        gitignore_file: gitignore
+            .as_ref()
+            .map(|context| context.ignore_file.clone()),
+        gitignore_matches: gitignore
+            .as_ref()
+            .map(|context| context.matched_paths.len())
+            .unwrap_or_default(),
         inaccessible_paths,
     })
 }
@@ -381,18 +419,40 @@ fn git_context(path: &Path) -> (bool, bool) {
     )
 }
 
+#[cfg(test)]
 fn directory_suggestion(path: &Path, allowlisted: bool) -> Option<DirectorySuggestion> {
+    directory_suggestion_with_context(path, allowlisted, false)
+}
+
+fn directory_suggestion_with_context(
+    path: &Path,
+    allowlisted: bool,
+    ignored_by_git: bool,
+) -> Option<DirectorySuggestion> {
     let name = path.file_name()?.to_string_lossy();
     if allowlisted {
         return Some(DirectorySuggestion {
             reason: "user-approved delete allowlist entry; review contents before Trash".to_owned(),
             can_delete: true,
+            kind: SuggestionKind::Allowlist,
         });
+    }
+    if ignored_by_git {
+        return Some(DirectorySuggestion {
+            reason: "matched .gitignore; review before moving this development artifact to Trash"
+                .to_owned(),
+            can_delete: true,
+            kind: SuggestionKind::GitIgnore,
+        });
+    }
+    if let Some(suggestion) = apple_suggestion(path) {
+        return Some(suggestion);
     }
     if let Some(area) = user_file_area(path) {
         return Some(DirectorySuggestion {
             reason: format!("item inside {area}; move to Trash after confirmation"),
             can_delete: true,
+            kind: SuggestionKind::UserFile,
         });
     }
 
@@ -420,21 +480,43 @@ fn directory_suggestion(path: &Path, allowlisted: bool) -> Option<DirectorySugge
     Some(DirectorySuggestion {
         reason: reason.to_owned(),
         can_delete,
+        kind: if can_delete {
+            SuggestionKind::Regenerable
+        } else {
+            SuggestionKind::Review
+        },
     })
 }
 
 fn file_suggestion(path: &Path) -> Option<DirectorySuggestion> {
+    file_suggestion_with_context(path, false)
+}
+
+fn file_suggestion_with_context(path: &Path, ignored_by_git: bool) -> Option<DirectorySuggestion> {
     let name = path.file_name()?.to_string_lossy();
+    if ignored_by_git {
+        return Some(DirectorySuggestion {
+            reason: "matched .gitignore; review before moving this development artifact to Trash"
+                .to_owned(),
+            can_delete: true,
+            kind: SuggestionKind::GitIgnore,
+        });
+    }
+    if let Some(suggestion) = apple_suggestion(path) {
+        return Some(suggestion);
+    }
     if let Some(area) = user_file_area(path) {
         return Some(DirectorySuggestion {
             reason: format!("file inside {area}; move to Trash after confirmation"),
             can_delete: true,
+            kind: SuggestionKind::UserFile,
         });
     }
     if path.starts_with(Path::new("/cores")) && (name == "core" || name.starts_with("core.")) {
         return Some(DirectorySuggestion {
             reason: "crash dump; keep only if it is still needed for debugging".to_owned(),
             can_delete: true,
+            kind: SuggestionKind::Review,
         });
     }
     if path.starts_with(Path::new("/private/tmp"))
@@ -443,6 +525,7 @@ fn file_suggestion(path: &Path) -> Option<DirectorySuggestion> {
         return Some(DirectorySuggestion {
             reason: "system temporary file; verify it is stale and not in use".to_owned(),
             can_delete: true,
+            kind: SuggestionKind::Review,
         });
     }
     let reason = match name.as_ref() {
@@ -454,7 +537,292 @@ fn file_suggestion(path: &Path) -> Option<DirectorySuggestion> {
     Some(DirectorySuggestion {
         reason: reason.to_owned(),
         can_delete: false,
+        kind: SuggestionKind::Review,
     })
+}
+
+fn suggestion_priority(entry: &DirectoryScanEntry) -> u8 {
+    match entry.suggestion.as_ref().map(|suggestion| &suggestion.kind) {
+        Some(SuggestionKind::GitIgnore) => 5,
+        Some(SuggestionKind::Allowlist) => 4,
+        Some(SuggestionKind::Apple) => 4,
+        Some(SuggestionKind::UserFile) => 3,
+        Some(SuggestionKind::Regenerable) => 3,
+        Some(SuggestionKind::Review) => 2,
+        None => 0,
+    }
+}
+
+fn apple_suggestion(path: &Path) -> Option<DirectorySuggestion> {
+    #[cfg(target_os = "macos")]
+    {
+        let home = config::home_dir()?;
+        let relative = path.strip_prefix(home).ok()?;
+        let caches = Path::new("Library/Caches");
+        let logs = Path::new("Library/Logs");
+        let crash_reporter = Path::new("Library/Application Support/CrashReporter");
+        let mail_downloads = Path::new("Library/Mail Downloads");
+        let mail_container_downloads =
+            Path::new("Library/Containers/com.apple.mail/Data/Library/Mail Downloads");
+        let ios_backups = Path::new("Library/Application Support/MobileSync/Backup");
+        let derived_data = Path::new("Library/Developer/Xcode/DerivedData");
+        let archives = Path::new("Library/Developer/Xcode/Archives");
+        let simulator_caches = Path::new("Library/Developer/CoreSimulator/Caches");
+        let device_support = Path::new("Library/Developer/Xcode/iOS DeviceSupport");
+
+        let inside = |root: &Path| relative.starts_with(root) && relative != root;
+        let exact_or_inside = |root: &Path| relative.starts_with(root);
+
+        let (reason, can_delete) = if inside(caches) {
+            (
+                "Apple/macOS app cache; it can be recreated when needed",
+                true,
+            )
+        } else if inside(logs) {
+            (
+                "Apple/app logs; review before moving old logs to Trash",
+                true,
+            )
+        } else if exact_or_inside(crash_reporter) {
+            (
+                "Apple CrashReporter data; review before moving it to Trash",
+                true,
+            )
+        } else if exact_or_inside(mail_downloads) || exact_or_inside(mail_container_downloads) {
+            (
+                "Apple Mail downloaded attachments; review before moving to Trash",
+                true,
+            )
+        } else if exact_or_inside(ios_backups) {
+            (
+                "Apple iPhone/iPad backup; verify another backup exists first",
+                true,
+            )
+        } else if exact_or_inside(derived_data) {
+            ("Xcode DerivedData; generated build intermediates", true)
+        } else if exact_or_inside(archives) {
+            (
+                "Xcode archive; review before moving old builds to Trash",
+                true,
+            )
+        } else if exact_or_inside(simulator_caches) {
+            ("CoreSimulator generated cache; it can be recreated", true)
+        } else if inside(device_support) {
+            (
+                "Xcode device-support version; review whether that device version is still needed",
+                true,
+            )
+        } else {
+            return None;
+        };
+
+        return Some(DirectorySuggestion {
+            reason: reason.to_owned(),
+            can_delete,
+            kind: SuggestionKind::Apple,
+        });
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = path;
+        None
+    }
+}
+
+fn gitignore_context(path: &Path, children: &[PathBuf]) -> Option<GitIgnoreContext> {
+    let repo_root = git_repo_root(path);
+    let root = repo_root.clone().or_else(|| {
+        path.join(".gitignore")
+            .is_file()
+            .then(|| path.to_path_buf())
+    })?;
+    let path_for_lookup = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let ignore_file = nearest_gitignore(&path_for_lookup, &root).or_else(|| {
+        root.join(".gitignore")
+            .is_file()
+            .then(|| root.join(".gitignore"))
+    })?;
+
+    let matched_paths = if repo_root.is_some() {
+        gitignore_matches_with_git(&root, children)
+    } else {
+        gitignore_matches_from_file(&ignore_file, &root, children)
+    };
+
+    Some(GitIgnoreContext {
+        ignore_file,
+        matched_paths,
+    })
+}
+
+fn git_repo_root(path: &Path) -> Option<PathBuf> {
+    let output = Command::new("git")
+        .args(["-C"])
+        .arg(path)
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let root = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if root.is_empty() {
+        return None;
+    }
+    let root = PathBuf::from(root);
+    Some(std::fs::canonicalize(&root).unwrap_or(root))
+}
+
+fn nearest_gitignore(path: &Path, root: &Path) -> Option<PathBuf> {
+    let mut current = path;
+    loop {
+        let candidate = current.join(".gitignore");
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+        if current == root {
+            break;
+        }
+        current = current.parent()?;
+    }
+    None
+}
+
+fn gitignore_matches_with_git(root: &Path, children: &[PathBuf]) -> HashSet<PathBuf> {
+    let mut candidates = HashMap::new();
+    let mut input = Vec::new();
+    for child in children {
+        let child_for_lookup = std::fs::canonicalize(child).unwrap_or_else(|_| child.clone());
+        let Ok(relative) = child_for_lookup.strip_prefix(root) else {
+            continue;
+        };
+        let relative = relative.to_string_lossy().into_owned();
+        candidates.insert(relative.clone(), child.clone());
+        input.extend_from_slice(relative.as_bytes());
+        input.push(0);
+    }
+    if input.is_empty() {
+        return HashSet::new();
+    }
+
+    let Ok(mut process) = Command::new("git")
+        .args(["-C"])
+        .arg(root)
+        .args(["check-ignore", "--no-index", "-z", "--stdin"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return HashSet::new();
+    };
+    let Some(mut stdin) = process.stdin.take() else {
+        return HashSet::new();
+    };
+    if stdin.write_all(&input).is_err() {
+        return HashSet::new();
+    }
+    drop(stdin);
+    let Ok(output) = process.wait_with_output() else {
+        return HashSet::new();
+    };
+    String::from_utf8_lossy(&output.stdout)
+        .split('\0')
+        .filter_map(|matched| {
+            let normalized = matched.trim_end_matches('/');
+            candidates.get(normalized).cloned()
+        })
+        .collect()
+}
+
+fn gitignore_matches_from_file(
+    ignore_file: &Path,
+    root: &Path,
+    children: &[PathBuf],
+) -> HashSet<PathBuf> {
+    let Ok(contents) = std::fs::read_to_string(ignore_file) else {
+        return HashSet::new();
+    };
+    children
+        .iter()
+        .filter(|child| {
+            let Ok(relative) = child.strip_prefix(root) else {
+                return false;
+            };
+            gitignore_matches_path(&contents, &relative.to_string_lossy(), child.is_dir())
+        })
+        .cloned()
+        .collect()
+}
+
+fn gitignore_matches_path(contents: &str, relative: &str, is_dir: bool) -> bool {
+    let mut ignored = false;
+    for raw_pattern in contents.lines() {
+        let mut pattern = raw_pattern.trim().to_owned();
+        if pattern.is_empty() || pattern.starts_with('#') {
+            continue;
+        }
+        let negated = pattern.starts_with('!');
+        if negated {
+            pattern.remove(0);
+        }
+        if pattern.ends_with('/') {
+            if !is_dir {
+                continue;
+            }
+            pattern.pop();
+        }
+        if pattern.starts_with('/') {
+            pattern.remove(0);
+        }
+        let matches = if pattern.contains('/') {
+            glob_match(&pattern, relative)
+                || (is_dir
+                    && pattern.ends_with("/**")
+                    && relative == pattern.trim_end_matches("/**").trim_end_matches('/'))
+        } else {
+            relative
+                .rsplit('/')
+                .next()
+                .is_some_and(|name| glob_match(&pattern, name))
+        };
+        if matches {
+            ignored = !negated;
+        }
+    }
+    ignored
+}
+
+fn glob_match(pattern: &str, value: &str) -> bool {
+    fn matches(pattern: &[char], value: &[char], pattern_index: usize, value_index: usize) -> bool {
+        if pattern_index == pattern.len() {
+            return value_index == value.len();
+        }
+        if pattern[pattern_index] == '*' {
+            if pattern_index + 1 < pattern.len() && pattern[pattern_index + 1] == '*' {
+                return matches(pattern, value, pattern_index + 2, value_index)
+                    || (value_index < value.len()
+                        && matches(pattern, value, pattern_index, value_index + 1));
+            }
+            return matches(pattern, value, pattern_index + 1, value_index)
+                || (value_index < value.len()
+                    && value[value_index] != '/'
+                    && matches(pattern, value, pattern_index, value_index + 1));
+        }
+        if value_index == value.len() {
+            return false;
+        }
+        (pattern[pattern_index] == '?' || pattern[pattern_index] == value[value_index])
+            && matches(pattern, value, pattern_index + 1, value_index + 1)
+    }
+
+    matches(
+        &pattern.chars().collect::<Vec<_>>(),
+        &value.chars().collect::<Vec<_>>(),
+        0,
+        0,
+    )
 }
 
 fn user_file_area(path: &Path) -> Option<&'static str> {
@@ -693,9 +1061,10 @@ mod tests {
     #[cfg(target_os = "macos")]
     use super::is_protected_path;
     use super::{
-        config, dir_size, directory_suggestion, file_suggestion, readonly_directory_entry,
-        scan_children_with_progress, scan_directory, scan_home_entries, scan_readonly_paths,
-        trim_entries, DiskScanEntry, STANDARD_HOME_DIRECTORIES,
+        apple_suggestion, config, dir_size, directory_suggestion, file_suggestion,
+        gitignore_matches_path, readonly_directory_entry, scan_children_with_progress,
+        scan_directory, scan_home_entries, scan_readonly_paths, trim_entries, DiskScanEntry,
+        SuggestionKind, STANDARD_HOME_DIRECTORIES,
     };
     use std::fs;
     use std::path::Path;
@@ -800,6 +1169,106 @@ mod tests {
             .as_ref()
             .is_some_and(|suggestion| suggestion.can_delete));
         assert!(!report.is_git_repo);
+    }
+
+    #[test]
+    fn directory_scan_prioritizes_gitignore_matches() {
+        let root = tempdir().expect("temporary directory");
+        fs::write(
+            root.path().join(".gitignore"),
+            "node_modules/\n*.log\n!important.log\n",
+        )
+        .expect("gitignore");
+        fs::create_dir(root.path().join("node_modules")).expect("node_modules directory");
+        fs::write(root.path().join("node_modules/package.json"), b"{}").expect("package");
+        fs::write(root.path().join("old.log"), b"old log").expect("ignored log");
+        fs::write(root.path().join("important.log"), b"keep").expect("unignored log");
+        fs::write(root.path().join("notes.txt"), b"notes").expect("normal file");
+
+        let report = scan_directory(root.path(), 10).expect("directory scan");
+
+        assert_eq!(
+            report.gitignore_file,
+            Some(std::fs::canonicalize(root.path().join(".gitignore")).expect("canonical path"))
+        );
+        assert_eq!(report.gitignore_matches, 2);
+        assert!(report.entries.iter().take(2).all(|entry| {
+            entry
+                .suggestion
+                .as_ref()
+                .is_some_and(|suggestion| suggestion.kind == SuggestionKind::GitIgnore)
+        }));
+        let important = report
+            .entries
+            .iter()
+            .find(|entry| entry.path.ends_with("important.log"))
+            .expect("unignored exception");
+        assert!(important.suggestion.is_none());
+    }
+
+    #[test]
+    fn directory_scan_uses_gitignore_from_a_repository() {
+        let root = tempdir().expect("temporary directory");
+        fs::write(root.path().join(".gitignore"), "target/\n*.tmp\n").expect("gitignore");
+        fs::create_dir(root.path().join("target")).expect("target directory");
+        fs::write(root.path().join("target/debug.bin"), b"build").expect("build artifact");
+        fs::write(root.path().join("cache.tmp"), b"cache").expect("ignored cache");
+        let status = std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(root.path())
+            .status()
+            .expect("git init");
+        assert!(status.success());
+
+        let report = scan_directory(root.path(), 10).expect("directory scan");
+
+        assert!(report.is_git_repo);
+        assert_eq!(report.gitignore_matches, 2);
+        assert!(report.entries.iter().any(|entry| {
+            entry.path.ends_with("target")
+                && entry
+                    .suggestion
+                    .as_ref()
+                    .is_some_and(|suggestion| suggestion.kind == SuggestionKind::GitIgnore)
+        }));
+        assert!(report.entries.iter().any(|entry| {
+            entry.path.ends_with("cache.tmp")
+                && entry
+                    .suggestion
+                    .as_ref()
+                    .is_some_and(|suggestion| suggestion.kind == SuggestionKind::GitIgnore)
+        }));
+    }
+
+    #[test]
+    fn gitignore_matches_common_development_patterns() {
+        assert!(gitignore_matches_path("dist/\n*.tmp\n", "dist", true));
+        assert!(gitignore_matches_path("dist/\n*.tmp\n", "cache.tmp", false));
+        assert!(!gitignore_matches_path(
+            "*.log\n!important.log\n",
+            "important.log",
+            false
+        ));
+        assert!(gitignore_matches_path("build/**\n", "build", true));
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn apple_storage_locations_are_explicit_suggestions() {
+        let home = config::home_dir().expect("HOME");
+        for (relative, expected) in [
+            ("Library/Caches/ExampleApp", "Apple/macOS app cache"),
+            (
+                "Library/Application Support/MobileSync/Backup",
+                "Apple iPhone/iPad backup",
+            ),
+            ("Library/Developer/Xcode/DerivedData", "Xcode DerivedData"),
+        ] {
+            let suggestion = apple_suggestion(&home.join(relative)).expect("Apple suggestion");
+            assert_eq!(suggestion.kind, SuggestionKind::Apple);
+            assert!(suggestion.can_delete);
+            assert!(suggestion.reason.contains(expected));
+        }
     }
 
     #[test]
