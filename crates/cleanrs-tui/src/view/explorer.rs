@@ -64,7 +64,7 @@ pub(crate) fn render_full_disk(frame: &mut Frame, app: &App, area: ratatui::layo
             ]))
         };
         items.push(ListItem::new(Span::styled(
-            "Largest root entries",
+            "Largest root entries · top results",
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
@@ -73,7 +73,7 @@ pub(crate) fn render_full_disk(frame: &mut Frame, app: &App, area: ratatui::layo
         items.extend(report.root_entries.iter().map(&render_entry));
         items.push(ListItem::new(""));
         items.push(ListItem::new(Span::styled(
-            "Largest HOME entries",
+            "Largest HOME entries · top results",
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),

@@ -523,8 +523,17 @@ where
 }
 
 fn trim_entries(entries: &mut Vec<DiskScanEntry>, limit: usize) {
-    entries.sort_by_key(|entry| std::cmp::Reverse(entry.size_bytes));
+    sort_entries(entries);
     entries.truncate(limit);
+}
+
+fn sort_entries(entries: &mut [DiskScanEntry]) {
+    entries.sort_by(|left, right| {
+        right
+            .size_bytes
+            .cmp(&left.size_bytes)
+            .then_with(|| left.path.cmp(&right.path))
+    });
 }
 
 /// Keep the largest HOME entries while always retaining the standard user
@@ -568,7 +577,7 @@ where
         });
     }
 
-    entries.sort_by_key(|entry| std::cmp::Reverse(entry.size_bytes));
+    sort_entries(&mut entries);
     let mut selected = entries
         .iter()
         .filter(|entry| standard_paths.contains(&entry.path))
@@ -580,7 +589,7 @@ where
             .filter(|entry| !standard_paths.contains(&entry.path))
             .take(limit),
     );
-    selected.sort_by_key(|entry| std::cmp::Reverse(entry.size_bytes));
+    sort_entries(&mut selected);
     Ok((selected, inaccessible))
 }
 
@@ -686,7 +695,7 @@ mod tests {
     use super::{
         config, dir_size, directory_suggestion, file_suggestion, readonly_directory_entry,
         scan_children_with_progress, scan_directory, scan_home_entries, scan_readonly_paths,
-        STANDARD_HOME_DIRECTORIES,
+        trim_entries, DiskScanEntry, STANDARD_HOME_DIRECTORIES,
     };
     use std::fs;
     use std::path::Path;
@@ -736,6 +745,32 @@ mod tests {
         assert!(entries
             .iter()
             .any(|entry| entry.path.ends_with("empty") && entry.size_bytes == 0));
+    }
+
+    #[test]
+    fn top_entries_use_a_deterministic_path_tie_breaker() {
+        let mut entries = [
+            DiskScanEntry {
+                path: Path::new("z-last").to_path_buf(),
+                size_bytes: 10,
+                volume_usage: None,
+                inaccessible_paths: 0,
+                read_only: false,
+            },
+            DiskScanEntry {
+                path: Path::new("a-first").to_path_buf(),
+                size_bytes: 10,
+                volume_usage: None,
+                inaccessible_paths: 0,
+                read_only: false,
+            },
+        ]
+        .into_iter()
+        .collect::<Vec<_>>();
+
+        trim_entries(&mut entries, 1);
+
+        assert_eq!(entries[0].path, Path::new("a-first"));
     }
 
     #[test]
