@@ -56,4 +56,11 @@ pub mod config {
             .map(|path| path.join(command))
             .any(|path| path.is_file())
     }
+
+    pub fn open_permission_settings() -> std::io::Result<()> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "permission settings are not configured for this platform",
+        ))
+    }
 }

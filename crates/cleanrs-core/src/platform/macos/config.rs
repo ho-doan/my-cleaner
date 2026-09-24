@@ -1,6 +1,10 @@
 //! macOS paths and system-safety policy.
 
-use std::path::{Path, PathBuf};
+use std::{
+    io::Error,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 pub const STANDARD_HOME_DIRECTORIES: [&str; 3] = ["Desktop", "Documents", "Downloads"];
 
@@ -91,4 +95,19 @@ pub fn command_available(command: &str) -> bool {
         .flat_map(|paths| std::env::split_paths(&paths).collect::<Vec<_>>())
         .map(|path| path.join(command))
         .any(|path| path.is_file())
+}
+
+/// Open the macOS privacy page where the user can grant Full Disk Access to
+/// Terminal, cleanrs, or the calling host application.
+pub fn open_permission_settings() -> std::io::Result<()> {
+    let status = Command::new("open")
+        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(Error::other(
+            "macOS refused to open Privacy & Security settings",
+        ))
+    }
 }

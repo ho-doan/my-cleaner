@@ -21,6 +21,7 @@ pub(crate) enum KeyAction {
     GlobalTools,
     StandaloneTools,
     OpenDirectory,
+    RequestPermission,
     Quit,
     Rescan,
     UninstallGlobal,
@@ -98,6 +99,9 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) -> KeyAction {
                         _ => {}
                     }
                 } else {
+                    if app.directory_scan.is_none() && key.code == KeyCode::Char('p') {
+                        return KeyAction::RequestPermission;
+                    }
                     match key.code {
                         KeyCode::Down | KeyCode::Char('j') => app.move_directory_cursor(1),
                         KeyCode::Up | KeyCode::Char('k') => app.move_directory_cursor(-1),

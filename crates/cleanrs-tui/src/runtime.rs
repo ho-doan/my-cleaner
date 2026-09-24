@@ -3,9 +3,9 @@
 use anyhow::Result;
 use cleanrs_core::{
     all_cleaners, check_latest_release, default_scan_root, full_disk_scan_with_progress,
-    scan_all_reports, scan_cleaner, scan_directory, scan_global_tools, toggle_delete_allowlist,
-    uninstall_global_tool, CleanMethod, CleanTarget, CleanerScan, DirectoryScan,
-    FullDiskScanProgress, GlobalTool, GlobalToolScan, ReadOnlyScan, StandaloneTool,
+    open_permission_settings, scan_all_reports, scan_cleaner, scan_directory, scan_global_tools,
+    toggle_delete_allowlist, uninstall_global_tool, CleanMethod, CleanTarget, CleanerScan,
+    DirectoryScan, FullDiskScanProgress, GlobalTool, GlobalToolScan, ReadOnlyScan, StandaloneTool,
     StandaloneToolScan, UpdateInfo,
 };
 use crossbeam_channel::{unbounded, Receiver, TryRecvError};
@@ -451,6 +451,18 @@ pub(crate) fn run_loop(stdout: &mut Stdout, current_version: &str) -> Result<Run
                                 full_disk_receiver = Some(start_full_disk_scan());
                             }
                         }
+                        KeyAction::RequestPermission => match open_permission_settings() {
+                            Ok(()) => {
+                                app.last_action = Some(
+                                    "Permission settings opened; grant access, then press [f] to rescan"
+                                        .to_owned(),
+                                );
+                            }
+                            Err(error) => {
+                                app.last_action =
+                                    Some(format!("Could not open permission settings: {error}"));
+                            }
+                        },
                         KeyAction::GlobalTools => {
                             app.show_global_tools = true;
                             app.show_standalone_tools = false;

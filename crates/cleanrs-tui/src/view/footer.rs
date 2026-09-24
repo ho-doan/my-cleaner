@@ -246,6 +246,8 @@ pub(crate) fn footer_lines(app: &App) -> Vec<Line<'static>> {
                             Span::raw(" Choose   "),
                             footer_key("f"),
                             Span::raw(" Rescan   "),
+                            footer_key("p"),
+                            Span::raw(" Permissions   "),
                             footer_key("q"),
                             Span::raw(" Quit"),
                         ],

@@ -493,7 +493,10 @@ where
 
                     let (size_bytes, inaccessible) = tolerant_dir_size(&path);
                     let read_only = is_protected_path(&path);
-                    let entry = (size_bytes > 0).then_some(DiskScanEntry {
+                    // Keep zero-byte and inaccessible children in the inventory. A
+                    // permission or mount error must be visible as PARTIAL instead
+                    // of making the folder disappear between rescans.
+                    let entry = Some(DiskScanEntry {
                         path: path.clone(),
                         size_bytes,
                         volume_usage: volume_usage(&path),
@@ -716,6 +719,7 @@ mod tests {
             fs::create_dir(&directory).expect("child directory");
             fs::write(directory.join("data.bin"), vec![0_u8; 8]).expect("child data");
         }
+        fs::create_dir(root.path().join("empty")).expect("empty child directory");
 
         let mut progress = Vec::new();
         let (entries, inaccessible) =
@@ -725,10 +729,13 @@ mod tests {
             .expect("child scan");
 
         assert_eq!(inaccessible, 0);
-        assert_eq!(entries.len(), 2);
-        assert_eq!(progress.len(), 2);
-        assert!(progress.iter().all(|(_, _, _, total)| *total == 2));
-        assert_eq!(progress.last().map(|item| item.2), Some(2));
+        assert_eq!(entries.len(), 3);
+        assert_eq!(progress.len(), 3);
+        assert!(progress.iter().all(|(_, _, _, total)| *total == 3));
+        assert_eq!(progress.last().map(|item| item.2), Some(3));
+        assert!(entries
+            .iter()
+            .any(|entry| entry.path.ends_with("empty") && entry.size_bytes == 0));
     }
 
     #[test]

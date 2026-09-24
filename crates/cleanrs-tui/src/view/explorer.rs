@@ -120,6 +120,12 @@ pub(crate) fn render_full_disk(frame: &mut Frame, app: &App, area: ratatui::layo
                 Style::default().fg(Color::Yellow),
             ),
         ])));
+        if report.inaccessible_paths > 0 {
+            items.push(ListItem::new(Span::styled(
+                "Blocked paths · press [p] to open permission settings, then [f] to rescan",
+                Style::default().fg(Color::Yellow),
+            )));
+        }
     } else if !app.full_disk_scanning {
         items.push(ListItem::new("Press [f] to start a full-disk scan."));
     }

@@ -1,6 +1,10 @@
 //! Windows paths and system-safety policy.
 
-use std::path::{Path, PathBuf};
+use std::{
+    io::Error,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 pub const STANDARD_HOME_DIRECTORIES: [&str; 3] = ["Desktop", "Documents", "Downloads"];
 
@@ -136,4 +140,18 @@ pub fn command_available(command: &str) -> bool {
             candidates
         })
         .any(|path| path.is_file())
+}
+
+/// Open the Windows broad filesystem access settings page.
+pub fn open_permission_settings() -> std::io::Result<()> {
+    let status = Command::new("explorer.exe")
+        .arg("ms-settings:privacy-broadfilesystemaccess")
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(Error::other(
+            "Windows refused to open filesystem privacy settings",
+        ))
+    }
 }

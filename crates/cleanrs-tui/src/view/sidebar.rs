@@ -222,6 +222,12 @@ pub(crate) fn render_sidebar(frame: &mut Frame, app: &App, area: ratatui::layout
             "Blocked: {}",
             report.inaccessible_paths
         )));
+        if report.inaccessible_paths > 0 {
+            lines.push(Line::from(Span::styled(
+                "Press [p] for permission settings · [f] to rescan",
+                Style::default().fg(Color::Yellow),
+            )));
+        }
     } else if !app.full_disk_scanning {
         lines.push(Line::from("Press [f] to scan"));
     }

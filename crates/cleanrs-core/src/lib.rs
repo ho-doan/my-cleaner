@@ -24,7 +24,7 @@ pub use global::{
     GlobalToolScan,
 };
 pub use model::{Category, CleanMethod, CleanOptions, CleanResult, CleanTarget, RiskLevel};
-pub use platform::config::default_scan_root;
+pub use platform::config::{default_scan_root, open_permission_settings};
 pub use report::{all_reporters, scan_all_reports, ReadOnlyScan, ReadOnlyTarget, ReportOnly};
 pub use scanner::{
     can_delete_path, dir_size, full_disk_scan, full_disk_scan_with_progress, is_protected_path,
