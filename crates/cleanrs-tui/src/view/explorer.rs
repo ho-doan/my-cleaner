@@ -178,7 +178,7 @@ pub(crate) fn render_directory(frame: &mut Frame, app: &App, area: ratatui::layo
         items.push(ListItem::new(git_status));
         if let Some(ignore_file) = &report.gitignore_file {
             items.push(ListItem::new(format!(
-                "Git ignore: {} · {} match(es) prioritized",
+                "Git ignore: {} · {} match(es) · list sorted by size",
                 ignore_file.display(),
                 report.gitignore_matches
             )));

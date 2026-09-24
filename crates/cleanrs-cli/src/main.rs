@@ -311,6 +311,28 @@ fn print_scan_table(reports: &[CleanerScan]) {
     table.load_preset(UTF8_FULL);
     table.set_header(["Cleaner", "Target", "Size", "Risk", "Path"]);
 
+    let mut targets = reports
+        .iter()
+        .flat_map(|report| report.targets.iter().map(move |target| (report, target)))
+        .collect::<Vec<_>>();
+    targets.sort_by(|(left_report, left), (right_report, right)| {
+        right
+            .size_bytes
+            .cmp(&left.size_bytes)
+            .then_with(|| left.path.cmp(&right.path))
+            .then_with(|| left_report.cleaner_id.cmp(&right_report.cleaner_id))
+    });
+
+    for (report, target) in targets {
+        table.add_row([
+            report.display_name.clone(),
+            target.description.clone(),
+            format_size(target.size_bytes, DECIMAL),
+            format!("{:?}", report.risk_level),
+            target.path.display().to_string(),
+        ]);
+    }
+
     for report in reports {
         if let Some(error) = &report.error {
             table.add_row([
@@ -336,16 +358,6 @@ fn print_scan_table(reports: &[CleanerScan]) {
                 format!("{:?}", report.risk_level),
                 "-".to_owned(),
             ]);
-        } else {
-            for target in &report.targets {
-                table.add_row([
-                    report.display_name.clone(),
-                    target.description.clone(),
-                    format_size(target.size_bytes, DECIMAL),
-                    format!("{:?}", report.risk_level),
-                    target.path.display().to_string(),
-                ]);
-            }
         }
     }
 

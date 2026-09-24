@@ -102,7 +102,12 @@ pub fn scan_standalone_tools() -> StandaloneToolScan {
         }
     }
 
-    tools.sort_by(|left, right| left.path.cmp(&right.path));
+    tools.sort_by(|left, right| {
+        right
+            .size_bytes
+            .cmp(&left.size_bytes)
+            .then_with(|| left.path.cmp(&right.path))
+    });
     StandaloneToolScan { tools, errors }
 }
 

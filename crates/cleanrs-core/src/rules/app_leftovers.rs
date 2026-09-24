@@ -187,7 +187,12 @@ impl Cleaner for AppLeftoverCleaner {
                 append_target(&mut targets, spec, path, &description)?;
             }
         }
-        targets.sort_by(|left, right| left.path.cmp(&right.path));
+        targets.sort_by(|left, right| {
+            right
+                .size_bytes
+                .cmp(&left.size_bytes)
+                .then_with(|| left.path.cmp(&right.path))
+        });
         Ok(targets)
     }
 }

@@ -197,9 +197,7 @@ where
         |entry, inaccessible, completed, total| {
             if let Some(entry) = entry {
                 report.readonly_entries.push(entry);
-                report
-                    .readonly_entries
-                    .sort_by_key(|entry| entry.path.clone());
+                sort_entries(&mut report.readonly_entries);
             }
             report.inaccessible_paths += inaccessible;
             emit_progress(
@@ -212,7 +210,7 @@ where
             );
         },
     );
-    readonly_entries.sort_by_key(|entry| entry.path.clone());
+    sort_entries(&mut readonly_entries);
     report.readonly_entries = readonly_entries;
 
     if let Some(home) = config::home_dir() {
@@ -367,22 +365,18 @@ pub fn scan_directory(path: &Path, limit: usize) -> Result<DirectoryScan> {
         .into_iter()
         .filter_map(|(entry, _)| entry)
         .collect::<Vec<_>>();
-    entries.sort_by(|left, right| {
-        left.read_only
-            .cmp(&right.read_only)
-            .then_with(|| suggestion_priority(right).cmp(&suggestion_priority(left)))
-            .then_with(|| right.size_bytes.cmp(&left.size_bytes))
-            .then_with(|| left.path.cmp(&right.path))
-    });
-
     let readonly_entries = entries
         .iter()
         .filter(|entry| entry.read_only)
         .cloned()
         .collect::<Vec<_>>();
     entries.retain(|entry| !entry.read_only);
+    sort_directory_entries(&mut entries);
     entries.truncate(limit);
+    let mut readonly_entries = readonly_entries;
+    sort_directory_entries(&mut readonly_entries);
     entries.extend(readonly_entries);
+    sort_directory_entries(&mut entries);
 
     Ok(DirectoryScan {
         path: path.to_path_buf(),
@@ -551,6 +545,16 @@ fn suggestion_priority(entry: &DirectoryScanEntry) -> u8 {
         Some(SuggestionKind::Review) => 2,
         None => 0,
     }
+}
+
+fn sort_directory_entries(entries: &mut [DirectoryScanEntry]) {
+    entries.sort_by(|left, right| {
+        right
+            .size_bytes
+            .cmp(&left.size_bytes)
+            .then_with(|| suggestion_priority(right).cmp(&suggestion_priority(left)))
+            .then_with(|| left.path.cmp(&right.path))
+    });
 }
 
 fn apple_suggestion(path: &Path) -> Option<DirectorySuggestion> {
@@ -886,6 +890,7 @@ where
             }
             on_item(entry, blocked, completed, total);
         }
+        sort_entries(&mut entries);
         (entries, inaccessible)
     }))
 }
@@ -1017,6 +1022,7 @@ where
             }
             on_item(entry, blocked, completed, total);
         }
+        sort_entries(&mut entries);
         (entries, inaccessible)
     })
 }
@@ -1192,12 +1198,23 @@ mod tests {
             Some(std::fs::canonicalize(root.path().join(".gitignore")).expect("canonical path"))
         );
         assert_eq!(report.gitignore_matches, 2);
-        assert!(report.entries.iter().take(2).all(|entry| {
-            entry
-                .suggestion
-                .as_ref()
-                .is_some_and(|suggestion| suggestion.kind == SuggestionKind::GitIgnore)
-        }));
+        assert_eq!(
+            report
+                .entries
+                .iter()
+                .filter(|entry| {
+                    entry
+                        .suggestion
+                        .as_ref()
+                        .is_some_and(|suggestion| suggestion.kind == SuggestionKind::GitIgnore)
+                })
+                .count(),
+            2
+        );
+        assert!(report
+            .entries
+            .windows(2)
+            .all(|entries| entries[0].size_bytes >= entries[1].size_bytes));
         let important = report
             .entries
             .iter()

@@ -111,7 +111,7 @@ pub fn all_cleaners() -> Vec<Box<dyn Cleaner>> {
 #[tracing::instrument(skip(cleaner), fields(cleaner_id = cleaner.id()))]
 pub fn scan_cleaner(cleaner: &dyn Cleaner) -> CleanerScan {
     let available = cleaner.is_available();
-    let (targets, error) = if !available {
+    let (mut targets, error) = if !available {
         (Vec::new(), None)
     } else {
         match cleaner.scan() {
@@ -125,6 +125,13 @@ pub fn scan_cleaner(cleaner: &dyn Cleaner) -> CleanerScan {
             Err(error) => (Vec::new(), Some(format!("{error:#}"))),
         }
     };
+
+    targets.sort_by(|left, right| {
+        right
+            .size_bytes
+            .cmp(&left.size_bytes)
+            .then_with(|| left.path.cmp(&right.path))
+    });
 
     CleanerScan {
         cleaner_id: cleaner.id().to_owned(),
@@ -153,7 +160,21 @@ pub fn scan_all(only: Option<&[String]>) -> Vec<CleanerScan> {
         })
         .map(|cleaner| scan_cleaner(cleaner.as_ref()))
         .collect::<Vec<_>>();
-    scans.sort_by(|left, right| left.cleaner_id.cmp(&right.cleaner_id));
+    scans.sort_by(|left, right| {
+        let left_size = left
+            .targets
+            .first()
+            .map(|target| target.size_bytes)
+            .unwrap_or_default();
+        let right_size = right
+            .targets
+            .first()
+            .map(|target| target.size_bytes)
+            .unwrap_or_default();
+        right_size
+            .cmp(&left_size)
+            .then_with(|| left.cleaner_id.cmp(&right.cleaner_id))
+    });
     scans
 }
 
@@ -188,12 +209,26 @@ mod tests {
         }
 
         fn scan(&self) -> Result<Vec<CleanTarget>> {
-            Ok(vec![CleanTarget {
-                path: PathBuf::from("cache://empty"),
-                size_bytes: 0,
-                description: "already empty".to_owned(),
-                method: CleanMethod::TrashPath,
-            }])
+            Ok(vec![
+                CleanTarget {
+                    path: PathBuf::from("cache://empty"),
+                    size_bytes: 0,
+                    description: "already empty".to_owned(),
+                    method: CleanMethod::TrashPath,
+                },
+                CleanTarget {
+                    path: PathBuf::from("cache://small"),
+                    size_bytes: 4,
+                    description: "small".to_owned(),
+                    method: CleanMethod::TrashPath,
+                },
+                CleanTarget {
+                    path: PathBuf::from("cache://large"),
+                    size_bytes: 8,
+                    description: "large".to_owned(),
+                    method: CleanMethod::TrashPath,
+                },
+            ])
         }
     }
 
@@ -202,6 +237,8 @@ mod tests {
         let report = scan_cleaner(&EmptyTargetCleaner);
 
         assert!(report.error.is_none());
-        assert!(report.targets.is_empty());
+        assert_eq!(report.targets.len(), 2);
+        assert_eq!(report.targets[0].size_bytes, 8);
+        assert_eq!(report.targets[1].size_bytes, 4);
     }
 }

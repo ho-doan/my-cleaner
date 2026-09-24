@@ -191,10 +191,11 @@ and sensitive folders remain review-only.
 
 When Explorer is inside a Git repository, cleanrs evaluates the applicable
 `.gitignore` rules (including a standalone `.gitignore` in a non-repository
-folder). Matching files and folders are marked `GITIGNORE`, moved ahead of
-ordinary size-only entries, and remain explicit, user-confirmed Trash
-candidates; `.gitignore` is a suggestion source, not an automatic deletion
-policy. On macOS, known Apple-managed user data locations are also surfaced as
+folder). Matching files and folders are marked `GITIGNORE` and remain explicit,
+user-confirmed Trash candidates; `.gitignore` is a suggestion source, not an
+automatic deletion policy. Explorer entries are sorted by visible size in
+descending order, with suggestion type and path used as tie-breakers. On
+macOS, known Apple-managed user data locations are also surfaced as
 `APPLE` suggestions, including app caches/logs, Mail Downloads, iPhone/iPad
 backups, Xcode DerivedData and Archives, CoreSimulator caches, and Xcode
 device-support versions. The standard Desktop, Documents, and Downloads

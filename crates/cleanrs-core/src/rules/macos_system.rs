@@ -65,7 +65,12 @@ impl Cleaner for MacosSystemCleaner {
             home_path("Library/Application Support/CrashReporter").context("HOME is not set")?;
         append_target(&mut targets, crash_reporter, "CrashReporter data")?;
 
-        targets.sort_by(|left, right| left.path.cmp(&right.path));
+        targets.sort_by(|left, right| {
+            right
+                .size_bytes
+                .cmp(&left.size_bytes)
+                .then_with(|| left.path.cmp(&right.path))
+        });
         Ok(targets)
     }
 }

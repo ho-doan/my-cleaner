@@ -266,6 +266,14 @@ impl App {
                 target,
                 selected: report.risk_level == RiskLevel::Safe,
             }));
+        self.rows.sort_by(|left, right| {
+            right
+                .target
+                .size_bytes
+                .cmp(&left.target.size_bytes)
+                .then_with(|| left.target.path.cmp(&right.target.path))
+                .then_with(|| left.cleaner_name.cmp(&right.cleaner_name))
+        });
     }
 
     pub(crate) fn selected_count(&self) -> usize {
